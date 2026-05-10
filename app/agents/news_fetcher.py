@@ -112,6 +112,7 @@ def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
         "source": (raw.get("source") or {}).get("name", "") or "",
         "published_at": raw.get("publishedAt", "") or "",
         "description": raw.get("description", "") or "",
+        "thumbnail_url": raw.get("urlToImage") or "",  # NewsAPI 이미지 필드
     }
 
 
