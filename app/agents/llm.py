@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.config import settings
 
-_MODEL_NAME = "gemini-2.0-flash-lite"
+_MODEL_NAME = "gemini-flash-latest"
 
 
 def _client():
