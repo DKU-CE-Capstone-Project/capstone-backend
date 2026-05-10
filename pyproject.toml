@@ -1,0 +1,35 @@
+[project]
+name = "capstone-backend"
+version = "0.1.0"
+description = "Real-time news multi-agent investment decision support — backend"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "python-dotenv>=1.0",
+    "google-generativeai>=0.8",
+    # google-adk is intentionally deferred — current orchestrator is a deterministic
+    # pipeline. ADK gets pulled in when we add reasoning/branching (SequentialAgent
+    # or LlmAgent with tools). Add `google-adk>=0.2` back at that point.
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

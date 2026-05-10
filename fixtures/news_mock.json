@@ -1,0 +1,86 @@
+{
+  "status": "ok",
+  "totalResults": 8,
+  "articles": [
+    {
+      "source": {"id": "reuters", "name": "Reuters"},
+      "author": "Reuters Staff",
+      "title": "Trump announces new tariff package, markets react",
+      "description": "President Trump announced a new package of tariffs targeting imports from several countries, sending equities lower in early trading.",
+      "url": "https://reuters.example.com/trump-tariff-2026",
+      "urlToImage": null,
+      "publishedAt": "2026-04-30T09:12:00Z",
+      "content": "President Trump announced a new package of tariffs targeting imports..."
+    },
+    {
+      "source": {"id": "bloomberg", "name": "Bloomberg"},
+      "author": "Bloomberg Staff",
+      "title": "Trump unveils tariff package; Wall Street slips",
+      "description": "Tariff announcement from the Trump administration triggered a selloff in global equities Wednesday morning.",
+      "url": "https://bloomberg.example.com/tariff-selloff",
+      "urlToImage": null,
+      "publishedAt": "2026-04-30T09:30:00Z",
+      "content": "A tariff announcement from the Trump administration triggered a selloff..."
+    },
+    {
+      "source": {"id": "ft", "name": "Financial Times"},
+      "author": "FT Staff",
+      "title": "Iran tensions rise after Trump comments",
+      "description": "Diplomatic tensions between Washington and Tehran escalated after recent remarks by President Trump on regional security.",
+      "url": "https://ft.example.com/iran-tensions",
+      "urlToImage": null,
+      "publishedAt": "2026-04-29T16:45:00Z",
+      "content": "Diplomatic tensions between Washington and Tehran escalated..."
+    },
+    {
+      "source": {"id": "wsj", "name": "Wall Street Journal"},
+      "author": "WSJ Staff",
+      "title": "Tech stocks lead market decline on tariff news",
+      "description": "Mega-cap technology shares paced declines as investors reassessed earnings exposure to new trade barriers.",
+      "url": "https://wsj.example.com/tech-decline-tariffs",
+      "urlToImage": null,
+      "publishedAt": "2026-04-30T11:02:00Z",
+      "content": "Mega-cap technology shares paced declines..."
+    },
+    {
+      "source": {"id": "cnbc", "name": "CNBC"},
+      "author": "CNBC Staff",
+      "title": "Trump tariff plan: what investors should watch",
+      "description": "Strategists weigh in on sectors most exposed to the announced tariff package and possible portfolio adjustments.",
+      "url": "https://cnbc.example.com/tariff-investor-guide",
+      "urlToImage": null,
+      "publishedAt": "2026-04-30T13:20:00Z",
+      "content": "Strategists weigh in on sectors most exposed..."
+    },
+    {
+      "source": {"id": "reuters", "name": "Reuters"},
+      "author": "Reuters Staff",
+      "title": "Trump announces new tariff package, markets react",
+      "description": "Duplicate-by-URL article that should be filtered out.",
+      "url": "https://reuters.example.com/trump-tariff-2026",
+      "urlToImage": null,
+      "publishedAt": "2026-04-30T09:12:00Z",
+      "content": "Duplicate."
+    },
+    {
+      "source": {"id": "yonhap", "name": "Yonhap"},
+      "author": "Yonhap Staff",
+      "title": "트럼프, 새 관세 발표에 한국 증시 출렁",
+      "description": "트럼프 대통령의 신규 관세 발표 여파로 한국 코스피 지수가 장중 하락세를 보였다.",
+      "url": "https://yonhap.example.com/kospi-tariff",
+      "urlToImage": null,
+      "publishedAt": "2026-04-30T10:00:00Z",
+      "content": "트럼프 대통령의 신규 관세 발표 여파로..."
+    },
+    {
+      "source": {"id": "ap", "name": "Associated Press"},
+      "author": "AP Staff",
+      "title": "Oil prices climb amid Iran-US tension",
+      "description": "Brent crude rose more than two percent as renewed friction between the United States and Iran raised supply concerns.",
+      "url": "https://ap.example.com/oil-iran",
+      "urlToImage": null,
+      "publishedAt": "2026-04-29T18:10:00Z",
+      "content": "Brent crude rose more than two percent..."
+    }
+  ]
+}
