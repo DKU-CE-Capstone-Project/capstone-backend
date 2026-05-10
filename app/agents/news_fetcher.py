@@ -96,7 +96,7 @@ def _translate_keyword(keyword: str) -> tuple[str, bool]:
 
 def _is_relevant(article: dict[str, Any], terms: list[str]) -> bool:
     """제목 또는 설명에 검색어(또는 주요 단어)가 하나라도 포함되는지 확인."""
-    text = (article.get("title", "") + " " + article.get("description", "")).lower()
+    text = ((article.get("title") or "") + " " + (article.get("description") or "")).lower()
     return any(t.lower() in text for t in terms if len(t) > 2)
 
 
