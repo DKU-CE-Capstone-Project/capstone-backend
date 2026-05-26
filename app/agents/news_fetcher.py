@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -6,6 +7,8 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.agents.gdelt_client import fetch_gdelt_articles
+from app.agents.content_extractor import extract_articles_batch
 
 NEWSAPI_URL = "https://newsapi.org/v2/everything"
 FIXTURE_PATH = Path(__file__).resolve().parents[2] / "fixtures" / "news_mock.json"
@@ -106,59 +109,128 @@ def _load_mock() -> list[dict[str, Any]]:
 
 
 def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
+    """NewsAPI 응답을 공통 형식으로 정규화합니다."""
     return {
         "title": raw.get("title", "") or "",
         "url": raw.get("url", "") or "",
         "source": (raw.get("source") or {}).get("name", "") or "",
         "published_at": raw.get("publishedAt", "") or "",
         "description": raw.get("description", "") or "",
-        "thumbnail_url": raw.get("urlToImage") or "",  # NewsAPI 이미지 필드
+        "thumbnail_url": raw.get("urlToImage") or "",
     }
 
 
-async def fetch_news(keyword: str, page_size: int = 12) -> list[dict[str, Any]]:
-    """Fetch raw articles for `keyword`.
+def _normalize_gdelt(art: dict[str, Any], cleaned_body: str) -> dict[str, Any]:
+    """GDELT + 본문 추출 결과를 공통 형식으로 정규화합니다.
 
-    - 한국어 키워드는 영문으로 변환 후 NewsAPI 호출
-    - NEWSAPI_KEY 없거나 USE_MOCK_NEWS=true 이면 fixture 반환
+    cleaned_body가 있으면 description으로 사용 (Gemini 요약 품질 향상).
     """
-    if settings.mock_news_active:
-        articles = _load_mock()
-        return [_normalize(a) for a in articles]
+    description = cleaned_body.strip() if cleaned_body else art.get("title", "")
+    # seendate 형식: "20260525T010000Z" → "2026-05-25T01:00:00Z"
+    raw_date = art.get("published_at", "")
+    if len(raw_date) == 16 and "T" in raw_date:
+        published_at = (
+            f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+            f"T{raw_date[9:11]}:{raw_date[11:13]}:{raw_date[13:15]}Z"
+        )
+    else:
+        published_at = raw_date
 
+    return {
+        "title": art.get("title", "") or "",
+        "url": art.get("url", "") or "",
+        "source": art.get("source_domain", "") or "",
+        "published_at": published_at,
+        "description": description,
+        "thumbnail_url": art.get("image_url", "") or "",
+    }
+
+
+async def _fetch_newsapi(keyword: str, page_size: int) -> list[dict[str, Any]]:
+    """NewsAPI 호출 (GDELT 실패 시 fallback)."""
     search_term, _ = _translate_keyword(keyword)
-
-    params = {
+    params: dict[str, Any] = {
         "q": search_term,
         "pageSize": page_size,
         "sortBy": "publishedAt",
         "language": "en",
-        "searchIn": "title,description",  # 제목/설명에만 매칭 → 관련 없는 기사 차단
+        "searchIn": "title,description",
         "apiKey": settings.newsapi_key,
     }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(NEWSAPI_URL, params=params)
-        resp.raise_for_status()
-        payload = resp.json()
-
-    articles = payload.get("articles", [])
-
-    # 결과가 없으면 language/searchIn 제한 없이 재시도
-    if not articles:
-        params.pop("language", None)
-        params.pop("searchIn", None)
+    try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(NEWSAPI_URL, params=params)
             resp.raise_for_status()
             payload = resp.json()
         articles = payload.get("articles", [])
 
-    # 관련성 필터: 검색어 주요 단어가 제목/설명에 포함된 기사만 유지
-    # (서로 무관한 기사가 혼입되는 경우 제거)
-    terms = search_term.split()
-    relevant = [a for a in articles if _is_relevant(a, terms)]
-    # 너무 많이 걸러지면 원본 유지 (최소 2건 보장)
-    if len(relevant) >= 2:
-        articles = relevant
+        if not articles:
+            params.pop("language", None)
+            params.pop("searchIn", None)
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(NEWSAPI_URL, params=params)
+                resp.raise_for_status()
+                payload = resp.json()
+            articles = payload.get("articles", [])
 
-    return [_normalize(a) for a in articles]
+        terms = search_term.split()
+        relevant = [a for a in articles if _is_relevant(a, terms)]
+        if len(relevant) >= 2:
+            articles = relevant
+        return [_normalize(a) for a in articles]
+    except Exception as exc:
+        print(f"[newsapi] fallback also failed: {exc}")
+        return []
+
+
+async def fetch_news(keyword: str, page_size: int = 12) -> list[dict[str, Any]]:
+    """기사 목록을 가져옵니다.
+
+    전략:
+    1. GDELT DOC API → URL 수집 + 중복 제거 → 본문 추출 (DOM/trafilatura)
+    2. GDELT 실패 또는 결과 없음 → NewsAPI fallback
+    3. USE_MOCK_NEWS=true → fixture 반환
+
+    반환 형식: [{title, url, source, published_at, description, thumbnail_url}]
+    description에 기사 full body가 담겨 Gemini 요약 품질이 크게 향상됩니다.
+    """
+    if settings.mock_news_active:
+        return [_normalize(a) for a in _load_mock()]
+
+    # ── 1) GDELT 시도 (글로벌 → 한국어 소스 순으로 시도) ────────────────────
+    search_term, _ = _translate_keyword(keyword)
+
+    # 1-a) 글로벌 검색 (언어 필터 없음 → 더 많은 결과)
+    gdelt_articles = await fetch_gdelt_articles(
+        keyword=search_term,
+        source_lang="",        # 전 언어 대상
+        maxrecords=page_size + 5,
+        timespan="1d",
+    )
+
+    # 1-b) 결과 없으면 한국어 소스 한정으로 재시도
+    if not gdelt_articles:
+        gdelt_articles = await fetch_gdelt_articles(
+            keyword=search_term,
+            source_lang="korean",
+            maxrecords=page_size + 5,
+            timespan="3d",     # 기간을 3일로 넓혀 결과 확보
+        )
+
+    if gdelt_articles:
+        # 본문 추출 (동시 최대 5개) — 느린 사이트가 있어도 전체를 블록하지 않음
+        enriched = await extract_articles_batch(
+            gdelt_articles[:page_size],
+            concurrency=5,
+        )
+        # 본문 있으면 full body, 없으면 제목을 description으로 사용
+        normalized = [_normalize_gdelt(art, art.get("cleaned_content", "")) for art in enriched]
+        result = [a for a in normalized if a["title"]]
+        if result:
+            has_body = sum(1 for a in result if len(a["description"]) > 100)
+            print(f"[news_fetcher] GDELT: {len(result)} articles, {has_body} with full body for '{keyword}'")
+            return result
+
+    # ── 2) NewsAPI fallback ──────────────────────────────────────────────────
+    print(f"[news_fetcher] GDELT unavailable — NewsAPI fallback for '{keyword}'")
+    return await _fetch_newsapi(keyword, page_size)
