@@ -13,6 +13,8 @@ dependencies = [
     "google-generativeai>=0.8",
     # 신규 google-genai SDK (llm.py가 `from google import genai` 사용) — 컨테이너 필수
     "google-genai>=1.0",
+    # Claude(Anthropic) — 텍스트 생성 우선 제공자 (anthropic_api_key 있을 때)
+    "anthropic>=0.49",
     # ── 뉴스 수집 파이프라인 ──────────────────────────────────────────────────
     # GDELT DOC API + 로컬 캐시 (requests는 sync 호출 전용, asyncio.to_thread 사용)
     "requests>=2.32",

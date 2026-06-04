@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     # Gemini 모델 — 무료 쿼터는 모델별 독립이므로 한 모델 소진 시 교체 가능
     gemini_model: str = "gemini-flash-latest"
 
+    # ── LLM 제공자 (텍스트 생성) ─────────────────────────────────────────
+    # anthropic_api_key가 있으면 Claude를 우선 사용(쿼터 여유), 실패 시 Gemini로 fallback.
+    # 임베딩은 Claude에 API가 없으므로 항상 Gemini 사용(google_api_key 유지).
+    anthropic_api_key: str = ""
+    claude_model: str = "claude-opus-4-8"
+    llm_provider: str = "auto"  # auto | anthropic | gemini
+
     # 뉴스 소스 토글: GDELT가 막힌(429/타임아웃) 환경에서는 False로 두어
     # NewsAPI를 바로 사용 (응답 지연·행 방지). 기본 True(한국어 GDELT 우선).
     use_gdelt: bool = True

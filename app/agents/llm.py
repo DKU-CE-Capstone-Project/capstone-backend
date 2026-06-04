@@ -16,7 +16,41 @@ def _client():
 
 
 async def generate(prompt: str) -> str:
-    """Generate text via Gemini. Returns empty string on error or missing key."""
+    """텍스트 생성. anthropic_api_key가 있으면 Claude 우선, 실패 시 Gemini로 fallback.
+
+    임베딩(embed)은 항상 Gemini — Claude에는 임베딩 API가 없음.
+    """
+    use_claude = settings.anthropic_api_key and settings.llm_provider in ("auto", "anthropic")
+    if use_claude:
+        text = await _generate_claude(prompt)
+        if text:
+            return text
+        # Claude 실패(쿼터/오류) → Gemini로 fallback (provider=anthropic 강제 시엔 빈 문자열)
+        if settings.llm_provider == "anthropic":
+            return ""
+    return await _generate_gemini(prompt)
+
+
+async def _generate_claude(prompt: str) -> str:
+    """Claude(Anthropic) 호출. 오류/미설치 시 빈 문자열(graceful)."""
+    try:
+        from anthropic import AsyncAnthropic
+
+        client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        # opus-4-8/4.7는 temperature/top_p 미지원(400) — 전달하지 않음
+        resp = await client.messages.create(
+            model=settings.claude_model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return "".join(b.text for b in resp.content if b.type == "text").strip()
+    except Exception as e:  # noqa: BLE001
+        print(f"[llm] Claude error (fallback): {type(e).__name__}: {e}")
+        return ""
+
+
+async def _generate_gemini(prompt: str) -> str:
+    """Gemini 호출. 키 없음/오류 시 빈 문자열(graceful)."""
     if not settings.google_api_key:
         return ""
     try:
