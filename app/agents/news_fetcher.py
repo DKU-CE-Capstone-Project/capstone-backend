@@ -8,7 +8,6 @@ import httpx
 
 from app.config import settings
 from app.agents.gdelt_client import fetch_gdelt_articles
-from app.agents.content_extractor import extract_articles_batch
 
 NEWSAPI_URL = "https://newsapi.org/v2/everything"
 FIXTURE_PATH = Path(__file__).resolve().parents[2] / "fixtures" / "news_mock.json"
@@ -187,52 +186,33 @@ async def fetch_news(keyword: str, page_size: int = 12) -> list[dict[str, Any]]:
     """기사 목록을 가져옵니다.
 
     전략:
-    1. GDELT DOC API → URL 수집 + 중복 제거 → 본문 추출 (DOM/trafilatura)
-    2. GDELT 실패 또는 결과 없음 → NewsAPI fallback
+    1. GDELT DOC API → 뉴스 목록 수집 + 중복 제거
+    2. USE_GDELT=false일 때만 기존 NewsAPI 경로 사용
     3. USE_MOCK_NEWS=true → fixture 반환
 
     반환 형식: [{title, url, source, published_at, description, thumbnail_url}]
-    description에 기사 full body가 담겨 Gemini 요약 품질이 크게 향상됩니다.
     """
     if settings.mock_news_active:
         return [_normalize(a) for a in _load_mock()]
 
-    # ── 1) GDELT 시도 (글로벌 → 한국어 소스 순으로 시도) ────────────────────
+    # ── 1) GDELT 목록 수집 ─────────────────────────────────────────────────
     search_term, _ = _translate_keyword(keyword)
 
-    # GDELT가 막힌 환경(429/타임아웃)에서는 use_gdelt=false로 두면 NewsAPI 직행
-    gdelt_articles: list[dict[str, Any]] = []
     if settings.use_gdelt:
-        # 1-a) 글로벌 검색 (언어 필터 없음 → 더 많은 결과)
         gdelt_articles = await fetch_gdelt_articles(
             keyword=search_term,
-            source_lang="",        # 전 언어 대상
-            maxrecords=page_size + 5,
+            source_lang="korean",
+            maxrecords=max(page_size, 20),
             timespan="1d",
         )
-        # 1-b) 결과 없으면 한국어 소스 한정으로 재시도
-        if not gdelt_articles:
-            gdelt_articles = await fetch_gdelt_articles(
-                keyword=search_term,
-                source_lang="korean",
-                maxrecords=page_size + 5,
-                timespan="3d",     # 기간을 3일로 넓혀 결과 확보
-            )
-
-    if gdelt_articles:
-        # 본문 추출 (동시 최대 5개) — 느린 사이트가 있어도 전체를 블록하지 않음
-        enriched = await extract_articles_batch(
-            gdelt_articles[:page_size],
-            concurrency=5,
-        )
-        # 본문 있으면 full body, 없으면 제목을 description으로 사용
-        normalized = [_normalize_gdelt(art, art.get("cleaned_content", "")) for art in enriched]
+        normalized = [_normalize_gdelt(art, "") for art in gdelt_articles[:page_size]]
         result = [a for a in normalized if a["title"]]
         if result:
-            has_body = sum(1 for a in result if len(a["description"]) > 100)
-            print(f"[news_fetcher] GDELT: {len(result)} articles, {has_body} with full body for '{keyword}'")
+            print(f"[news_fetcher] GDELT: {len(result)} article list items for '{keyword}'")
             return result
+        print(f"[news_fetcher] GDELT returned no article list items for '{keyword}'")
+        return []
 
-    # ── 2) NewsAPI fallback ──────────────────────────────────────────────────
-    print(f"[news_fetcher] GDELT unavailable — NewsAPI fallback for '{keyword}'")
+    # ── 2) 명시적으로 GDELT를 끈 경우에만 기존 NewsAPI 경로 사용 ─────────────
+    print(f"[news_fetcher] USE_GDELT=false — NewsAPI path for '{keyword}'")
     return await _fetch_newsapi(keyword, page_size)

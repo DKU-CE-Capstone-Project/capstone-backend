@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     newsapi_key: str = ""
     google_api_key: str = ""
-    use_mock_news: bool = True
+    use_mock_news: bool = False
     # Gemini 모델 — 무료 쿼터는 모델별 독립이므로 한 모델 소진 시 교체 가능
     gemini_model: str = "gemini-flash-latest"
 
@@ -23,8 +23,8 @@ class Settings(BaseSettings):
     claude_model: str = "claude-opus-4-8"
     llm_provider: str = "auto"  # auto | anthropic | gemini
 
-    # 뉴스 소스 토글: GDELT가 막힌(429/타임아웃) 환경에서는 False로 두어
-    # NewsAPI를 바로 사용 (응답 지연·행 방지). 기본 True(한국어 GDELT 우선).
+    # 뉴스 소스 토글: 기본 True면 GDELT DOC API로 뉴스 목록을 가져옵니다.
+    # False로 두면 기존 NewsAPI 경로를 명시적으로 사용합니다.
     use_gdelt: bool = True
 
     # LLM 카드 요약 토글: Gemini 무료 티어(5 req/min)에서 검색당 요약 6건이
@@ -55,7 +55,7 @@ class Settings(BaseSettings):
 
     @property
     def mock_news_active(self) -> bool:
-        return self.use_mock_news or self.demo_mode or not self.newsapi_key
+        return self.use_mock_news or self.demo_mode
 
     @property
     def cors_origin_list(self) -> list[str]:
