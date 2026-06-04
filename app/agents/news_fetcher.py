@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.agents.diffbot_client import extract_articles_with_diffbot
 from app.agents.gdelt_client import fetch_gdelt_articles
 
 NEWSAPI_URL = "https://newsapi.org/v2/everything"
@@ -205,7 +206,11 @@ async def fetch_news(keyword: str, page_size: int = 12) -> list[dict[str, Any]]:
             maxrecords=max(page_size, 20),
             timespan="1d",
         )
-        normalized = [_normalize_gdelt(art, "") for art in gdelt_articles[:page_size]]
+        enriched = await extract_articles_with_diffbot(gdelt_articles[:page_size])
+        normalized = [
+            _normalize_gdelt(art, art.get("cleaned_content", ""))
+            for art in enriched
+        ]
         result = [a for a in normalized if a["title"]]
         if result:
             print(f"[news_fetcher] GDELT: {len(result)} article list items for '{keyword}'")

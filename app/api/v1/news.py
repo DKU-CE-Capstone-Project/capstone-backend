@@ -49,10 +49,11 @@ def _thumb(art: dict[str, Any], idx: int = 0) -> tuple[str, bool]:
 
 def _to_news_card(art: dict[str, Any], idx: int = 0) -> NewsCard:
     thumb, _ = _thumb(art, idx)
+    title = art.get("title", "")
     return NewsCard(
         news_id=art.get("news_id") or make_news_id(art.get("url", "")),
-        title=art.get("title", ""),
-        summary=art.get("summary") or art.get("description", ""),
+        title=title,
+        summary=title or art.get("summary") or art.get("description", ""),
         thumbnail_url=thumb,
         source_name=art.get("source", ""),
         published_at=art.get("published_at", ""),
@@ -234,7 +235,7 @@ async def get_related(
             RelatedNewsItem(
                 news_id=art.get("news_id") or make_news_id(art.get("url", "")),
                 title=art.get("title", ""),
-                summary=art.get("summary") or art.get("description", ""),
+                summary=art.get("title", "") or art.get("summary") or art.get("description", ""),
                 thumbnail_url=thumb,
                 relevance_score=score if is_paid else None,
                 distance=1,
