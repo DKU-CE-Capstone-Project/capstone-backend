@@ -76,7 +76,7 @@ async def _fetch_and_cache(keyword: str) -> list[dict[str, Any]]:
         }
         for a in result.articles
     ]
-    return cache_articles(raw_articles)
+    return await cache_articles(raw_articles)
 
 
 async def _related_articles(news_id: str, extra: int = 8) -> list[dict[str, Any]]:
@@ -107,7 +107,7 @@ async def _related_articles(news_id: str, extra: int = 8) -> list[dict[str, Any]
         original_keyword = tokens[0] if tokens else center.get("title", "")[:15]
 
     raw = await fetch_news(original_keyword, page_size=extra + 2)
-    enriched = cache_articles([{**a, "_search_keyword": original_keyword} for a in raw])
+    enriched = await cache_articles([{**a, "_search_keyword": original_keyword} for a in raw])
     return [a for a in enriched if a.get("news_id") != news_id]
 
 

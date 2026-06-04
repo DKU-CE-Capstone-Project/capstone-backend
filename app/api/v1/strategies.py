@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 
 from app.agents.strategy_generator import generate_strategy
-from app import store
+from app import database, store
 from app.schemas import StrategyCreateRequest, StrategyCreateResponse, StrategyResponse
 
 router = APIRouter()
@@ -42,6 +42,7 @@ async def create_strategy(body: StrategyCreateRequest) -> StrategyCreateResponse
         "created_at": now,
     }
     store.strategy_cache[strategy_id] = full_strategy
+    await database.save_strategy(full_strategy)  # MongoDB write-through (use_mongodb 시)
 
     return StrategyCreateResponse(
         strategy_id=strategy_id,

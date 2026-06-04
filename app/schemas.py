@@ -154,6 +154,9 @@ class ReportResponse(BaseModel):
     evidence_news: list[dict[str, Any]]
     risk_factors: list[str]
     created_at: str
+    # AI 에이전트 강화: RAG 근거(유사 과거 뉴스 제목) + 검증(critic) 결과
+    rag_sources: list[str] = []
+    verification: dict[str, Any] | None = None
 
 
 # ── /api/v1/strategies ────────────────────────────────────────────────────────

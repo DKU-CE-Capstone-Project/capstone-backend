@@ -35,6 +35,16 @@ app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 app.include_router(legacy_router)
 
 
+@app.on_event("startup")
+async def _startup() -> None:
+    # MongoDB Atlas 인덱스 + 벡터검색 인덱스 보장 (use_mongodb 시, 실패해도 graceful)
+    from app import database
+
+    await database.ensure_indexes()
+
+
 @app.get("/health", tags=["system"])
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    from app import database
+
+    return {"status": "ok", "mongodb": "on" if database.enabled() else "off"}

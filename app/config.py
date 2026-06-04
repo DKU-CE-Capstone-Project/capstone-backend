@@ -35,6 +35,17 @@ class Settings(BaseSettings):
     demo_mode: bool = False
     demo_delay_seconds: float = 2.0
 
+    # ── MongoDB Atlas (영속화 + 벡터검색) ────────────────────────────────
+    # 연결 불가/미설정 시 use_mongodb=False로 두면 전 기능 graceful no-op (기존 흐름 유지).
+    mongodb_uri: str = ""
+    mongodb_db_name: str = "capstone_news"
+    use_mongodb: bool = False
+
+    # ── AI 에이전트 (RAG 그라운딩 + 검증) ────────────────────────────────
+    embedding_model: str = "gemini-embedding-001"  # Gemini 임베딩 (768차원 요청, generate와 별도 쿼터)
+    use_rag: bool = True       # 리포트 생성 시 벡터검색으로 유사 과거 뉴스 근거 주입
+    use_critic: bool = True    # 생성된 리포트를 검증(critic) 에이전트로 점검
+
     @property
     def mock_news_active(self) -> bool:
         return self.use_mock_news or self.demo_mode or not self.newsapi_key

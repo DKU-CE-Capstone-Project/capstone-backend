@@ -26,6 +26,8 @@ dependencies = [
     "nats-py>=2.6",
     # Redis 공유 상태 (멀티팟 job 결과 저장)
     "redis>=5.0",
+    # MongoDB Atlas (영속화 + Atlas Vector Search) — pymongo 4.x 동반(벡터 인덱스 API)
+    "motor>=3.4",
     # google-adk is intentionally deferred — current orchestrator is a deterministic
     # pipeline. ADK gets pulled in when we add reasoning/branching (SequentialAgent
     # or LlmAgent with tools). Add `google-adk>=0.2` back at that point.

@@ -38,3 +38,31 @@ async def generate(prompt: str) -> str:
         # 할당량 초과·네트워크 오류 등은 조용히 fallback 처리
         print(f"[llm] Gemini error (fallback): {type(e).__name__}: {e}")
         return ""
+
+
+async def embed(text: str) -> list[float]:
+    """Gemini 임베딩 벡터(768차원) 반환. 키 없음/오류 시 빈 리스트(graceful).
+
+    임베딩 쿼터는 generate_content와 별도 버킷이라 비교적 여유롭다.
+    """
+    if not settings.google_api_key or not (text or "").strip():
+        return []
+    try:
+        client = _client()
+        if client is None:
+            return []
+        from google.genai import types as gtypes
+
+        resp = await client.aio.models.embed_content(
+            model=settings.embedding_model,
+            contents=text[:8000],
+            config=gtypes.EmbedContentConfig(output_dimensionality=768),
+        )
+        # google-genai: resp.embeddings[0].values
+        embs = getattr(resp, "embeddings", None)
+        if embs:
+            return list(embs[0].values)
+        return []
+    except Exception as e:  # noqa: BLE001
+        print(f"[llm] embed error (skip): {type(e).__name__}: {e}")
+        return []

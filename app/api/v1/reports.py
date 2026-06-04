@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 
 from app.agents.report_generator import generate_report
-from app import store
+from app.agents.critic import verify_report
+from app import database, store
 from app.schemas import ReportCreateRequest, ReportCreateResponse, ReportResponse
 
 router = APIRouter()
@@ -31,6 +32,12 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
 
     report_data = await generate_report(center, related)
 
+    # 검증(critic) 에이전트: 근거 뉴스 대비 리포트 사실성 점검
+    evidence_summaries = [center.get("summary") or center.get("description", "")] + [
+        art.get("summary") or art.get("description", "") for art in related
+    ] + (report_data.get("rag_sources") or [])
+    verification = await verify_report(report_data, evidence_summaries)
+
     report_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
@@ -49,9 +56,12 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
             if nid in store.news_cache
         ],
         "risk_factors": report_data["risk_factors"],
+        "rag_sources": report_data.get("rag_sources", []),
+        "verification": verification,
         "created_at": now,
     }
     store.report_cache[report_id] = full_report
+    await database.save_report(full_report)  # MongoDB write-through (use_mongodb 시)
 
     return ReportCreateResponse(
         report_id=report_id,
