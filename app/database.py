@@ -61,18 +61,29 @@ async def ensure_indexes() -> None:
     db = _get_db()
     if db is None:
         return
+    # 1) 연결(ping) 실패만 치명적 → Mongo 비활성. 인덱스 실패는 비치명(레거시 데이터 충돌 등).
     try:
-        await _client.admin.command("ping")  # 연결 확인
-        await db[ARTICLES].create_index("news_id", unique=True)
-        await db[ARTICLES].create_index("_search_keyword")
-        await db[REPORTS].create_index("report_id", unique=True)
-        await db[STRATEGIES].create_index("strategy_id", unique=True)
-        print("[mongo] connected, indexes ensured")
-        await ensure_vector_index()
+        await _client.admin.command("ping")
     except Exception as exc:  # noqa: BLE001
         global _disabled
-        print(f"[mongo] ensure_indexes failed → disabled: {type(exc).__name__}: {exc}")
+        print(f"[mongo] ping failed → disabled: {type(exc).__name__}: {exc}")
         _disabled = True
+        return
+
+    print("[mongo] connected")
+    # 2) 인덱스는 개별 try (있으면 무시, 실패해도 계속) — upsert 동작엔 인덱스 불필요
+    for coll, key, uniq in [
+        (ARTICLES, "news_id", True),
+        (ARTICLES, "_search_keyword", False),
+        (REPORTS, "report_id", True),
+        (STRATEGIES, "strategy_id", True),
+    ]:
+        try:
+            await db[coll].create_index(key, unique=uniq)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[mongo] index {coll}.{key} skip: {type(exc).__name__}: {str(exc)[:80]}")
+    # 3) 벡터검색 인덱스 (RAG 핵심)
+    await ensure_vector_index()
 
 
 async def ensure_vector_index() -> None:
