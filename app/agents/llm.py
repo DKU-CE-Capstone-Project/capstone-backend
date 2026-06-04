@@ -37,11 +37,24 @@ async def _generate_claude(prompt: str) -> str:
         from anthropic import AsyncAnthropic
 
         client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-        # opus-4-8/4.7는 temperature/top_p 미지원(400) — 전달하지 않음
+        # opus/sonnet 4.x는 temperature/top_p 미지원(400) — 전달하지 않음.
+        # cache_control: 동일 프롬프트가 5분 내 반복되면 프리픽스 캐싱(프롬프트가 최소 길이 이상일 때).
+        # 실질 비용 절감은 app-level 결과 캐싱(summary_cache/report_index)이 담당.
         resp = await client.messages.create(
             model=settings.claude_model,
             max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
+            ],
         )
         return "".join(b.text for b in resp.content if b.type == "text").strip()
     except Exception as e:  # noqa: BLE001
