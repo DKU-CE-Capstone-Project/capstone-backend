@@ -29,7 +29,7 @@ GDELT_TIMEOUT_SECONDS = 60
 DEFAULT_SEARCH_QUERY = "semiconductor"
 DEFAULT_SOURCE_LANG = "korean"
 DEFAULT_SORT = "hybridrel"
-DEFAULT_MAX_RECORDS = 20
+DEFAULT_MAX_RECORDS = 10
 DEFAULT_TIMESPAN = "1d"
 
 _TRACKING_PARAMS = {"fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "source"}
@@ -220,7 +220,7 @@ def _fetch_gdelt_sync(
 async def fetch_gdelt_articles(
     keyword: str,
     source_lang: str = "korean",
-    maxrecords: int = 20,
+    maxrecords: int = DEFAULT_MAX_RECORDS,
     timespan: str = "1d",
 ) -> list[dict[str, Any]]:
     """GDELT DOC API에서 기사 목록을 비동기로 가져오고 중복 제거합니다.

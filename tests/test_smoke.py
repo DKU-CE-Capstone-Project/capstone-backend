@@ -1,9 +1,11 @@
 from fastapi.testclient import TestClient
 
+from app import store
 from app.config import settings
 from app.agents import diffbot_client
 from app.agents import news_fetcher
 from app.agents.graph_builder import build_graph
+from app.api.v1 import news as news_routes
 from app.api.v1.news import _to_news_card
 from app.agents.gdelt_client import build_gdelt_params
 from app.main import app
@@ -25,7 +27,7 @@ def test_gdelt_params_match_external_project_defaults() -> None:
         "mode": "artlist",
         "format": "json",
         "sort": "hybridrel",
-        "maxrecords": 20,
+        "maxrecords": 10,
         "timespan": "1d",
     }
 
@@ -47,7 +49,29 @@ def test_news_api_summary_prefers_title() -> None:
     assert graph["nodes"][1]["summary"] == "Displayed title"
 
 
-async def test_fetch_news_uses_gdelt_and_diffbot_content_when_available(monkeypatch) -> None:
+def test_search_endpoint_preserves_gdelt_thumbnail(monkeypatch) -> None:
+    async def fake_fetch_news(keyword: str, page_size: int = 10):
+        return [
+            {
+                "title": "Nvidia thumbnail story",
+                "url": "https://example.com/nvidia-thumbnail",
+                "source": "example.com",
+                "published_at": "2026-06-04T01:02:03Z",
+                "description": "Nvidia thumbnail story",
+                "thumbnail_url": "https://example.com/real-thumbnail.jpg",
+            }
+        ]
+
+    monkeypatch.setattr(news_routes, "fetch_news", fake_fetch_news)
+
+    resp = client.get("/api/v1/news/search?q=엔비디아&page=1&size=10")
+
+    assert resp.status_code == 200
+    card = resp.json()["news_cards"][0]
+    assert card["thumbnail_url"] == "https://example.com/real-thumbnail.jpg"
+
+
+async def test_fetch_news_uses_gdelt_list_without_diffbot(monkeypatch) -> None:
     calls = {}
 
     async def fake_fetch_gdelt_articles(**kwargs):
@@ -66,14 +90,10 @@ async def test_fetch_news_uses_gdelt_and_diffbot_content_when_available(monkeypa
     async def fail_newsapi(*args, **kwargs):
         raise AssertionError("NewsAPI should not be used when GDELT is enabled")
 
-    async def fake_extract_articles_with_diffbot(articles, **kwargs):
-        return [{**articles[0], "cleaned_content": "Full article body from Diffbot."}]
-
     monkeypatch.setattr(settings, "use_mock_news", False)
     monkeypatch.setattr(settings, "demo_mode", False)
     monkeypatch.setattr(settings, "use_gdelt", True)
     monkeypatch.setattr(news_fetcher, "fetch_gdelt_articles", fake_fetch_gdelt_articles)
-    monkeypatch.setattr(news_fetcher, "extract_articles_with_diffbot", fake_extract_articles_with_diffbot)
     monkeypatch.setattr(news_fetcher, "_fetch_newsapi", fail_newsapi)
 
     articles = await news_fetcher.fetch_news("반도체", page_size=5)
@@ -81,7 +101,7 @@ async def test_fetch_news_uses_gdelt_and_diffbot_content_when_available(monkeypa
     assert calls == {
         "keyword": "semiconductor",
         "source_lang": "korean",
-        "maxrecords": 20,
+        "maxrecords": 10,
         "timespan": "1d",
     }
     assert articles == [
@@ -90,7 +110,7 @@ async def test_fetch_news_uses_gdelt_and_diffbot_content_when_available(monkeypa
             "url": "https://example.com/news/1",
             "source": "example.com",
             "published_at": "2026-06-04T01:02:03Z",
-            "description": "Full article body from Diffbot.",
+            "description": "Semiconductor supply chain update",
             "thumbnail_url": "https://example.com/image.jpg",
         }
     ]
@@ -125,6 +145,31 @@ async def test_diffbot_extraction_adds_cleaned_content(monkeypatch) -> None:
 
     assert extracted[0]["cleaned_content"] == "First paragraph.\nSecond paragraph."
     assert extracted[0]["cleaned_content_length"] == len("First paragraph.\nSecond paragraph.")
+
+
+def test_source_endpoint_extracts_clicked_article_with_diffbot(monkeypatch) -> None:
+    news_id = "clicked-news"
+    store.news_cache[news_id] = {
+        "news_id": news_id,
+        "title": "Clicked title",
+        "url": "https://example.com/clicked",
+        "source": "example.com",
+        "published_at": "20260604T010203Z",
+        "description": "Clicked title",
+    }
+
+    async def fake_extract_articles_with_diffbot(articles, **kwargs):
+        return [{**articles[0], "cleaned_content": "Diffbot body for clicked article."}]
+
+    monkeypatch.setattr(settings, "use_mongodb", False)
+    monkeypatch.setattr(news_routes, "extract_articles_with_diffbot", fake_extract_articles_with_diffbot)
+
+    resp = client.get(f"/api/v1/news/{news_id}/source")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["original_body"] == "Diffbot body for clicked article."
+    assert store.news_cache[news_id]["description"] == "Diffbot body for clicked article."
 
 
 def test_analyze_with_mocked_news(monkeypatch) -> None:
