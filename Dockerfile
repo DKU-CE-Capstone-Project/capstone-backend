@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 패키지 메타 + 소스 복사 후 설치
 COPY pyproject.toml ./
 COPY app ./app
+COPY fixtures ./fixtures
 RUN pip install --no-cache-dir .
 
 EXPOSE 8000
