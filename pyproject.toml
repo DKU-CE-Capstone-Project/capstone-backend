@@ -19,6 +19,11 @@ dependencies = [
     "lxml>=5.0",
     # trafilatura fallback 추출기
     "trafilatura>=1.12",
+    # ── CNCF 이벤트 인프라 (api/worker 비동기 분리) ──────────────────────────
+    # NATS JetStream 클라이언트 (이벤트 버스 / 큐)
+    "nats-py>=2.6",
+    # Redis 공유 상태 (멀티팟 job 결과 저장)
+    "redis>=5.0",
     # google-adk is intentionally deferred — current orchestrator is a deterministic
     # pipeline. ADK gets pulled in when we add reasoning/branching (SequentialAgent
     # or LlmAgent with tools). Add `google-adk>=0.2` back at that point.

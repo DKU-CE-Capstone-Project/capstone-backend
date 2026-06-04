@@ -14,9 +14,23 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     use_mock_news: bool = True
 
+    # ── 클라우드/이벤트 인프라 (CNCF 재구성) ─────────────────────────────
+    nats_url: str = "nats://localhost:4222"
+    redis_url: str = "redis://localhost:6379/0"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    # demo_mode: burst 부하 데모의 재현성 확보용.
+    # 외부 API(GDELT 타임아웃/Gemini 쿼터) 변동을 제거하기 위해 mock 뉴스 + 고정 처리지연 사용.
+    demo_mode: bool = False
+    demo_delay_seconds: float = 2.0
+
     @property
     def mock_news_active(self) -> bool:
-        return self.use_mock_news or not self.newsapi_key
+        return self.use_mock_news or self.demo_mode or not self.newsapi_key
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 settings = Settings()
