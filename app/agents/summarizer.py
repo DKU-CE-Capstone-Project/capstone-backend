@@ -2,6 +2,7 @@ import asyncio
 from typing import Any
 
 from app.agents.llm import generate
+from app.config import settings
 
 _PROMPT = (
     "다음 영문/한국어 뉴스 기사를 한국어 한 문장으로 요약해. "
@@ -15,10 +16,14 @@ async def _summarize_one(article: dict[str, Any]) -> dict[str, Any]:
     description = article.get("description") or ""
     title = article.get("title") or ""
 
-    summary = await generate(_PROMPT.format(title=title, description=description))
-    if not summary:
-        # Fallback when no API key — use description verbatim, trimmed.
-        summary = (description or title)[:80]
+    # 무료 Gemini 쿼터 절약: use_llm_summaries=false면 LLM 호출 없이 description 사용.
+    # (Gemini는 리포트/전략 생성에만 사용 → 리포트가 안정적으로 실제 생성됨)
+    if settings.use_llm_summaries:
+        summary = await generate(_PROMPT.format(title=title, description=description))
+        if not summary:
+            summary = (description or title)[:120]
+    else:
+        summary = (description or title)[:120]
 
     return {**article, "summary": summary}
 

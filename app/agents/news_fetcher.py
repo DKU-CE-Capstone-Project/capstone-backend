@@ -200,22 +200,24 @@ async def fetch_news(keyword: str, page_size: int = 12) -> list[dict[str, Any]]:
     # ── 1) GDELT 시도 (글로벌 → 한국어 소스 순으로 시도) ────────────────────
     search_term, _ = _translate_keyword(keyword)
 
-    # 1-a) 글로벌 검색 (언어 필터 없음 → 더 많은 결과)
-    gdelt_articles = await fetch_gdelt_articles(
-        keyword=search_term,
-        source_lang="",        # 전 언어 대상
-        maxrecords=page_size + 5,
-        timespan="1d",
-    )
-
-    # 1-b) 결과 없으면 한국어 소스 한정으로 재시도
-    if not gdelt_articles:
+    # GDELT가 막힌 환경(429/타임아웃)에서는 use_gdelt=false로 두면 NewsAPI 직행
+    gdelt_articles: list[dict[str, Any]] = []
+    if settings.use_gdelt:
+        # 1-a) 글로벌 검색 (언어 필터 없음 → 더 많은 결과)
         gdelt_articles = await fetch_gdelt_articles(
             keyword=search_term,
-            source_lang="korean",
+            source_lang="",        # 전 언어 대상
             maxrecords=page_size + 5,
-            timespan="3d",     # 기간을 3일로 넓혀 결과 확보
+            timespan="1d",
         )
+        # 1-b) 결과 없으면 한국어 소스 한정으로 재시도
+        if not gdelt_articles:
+            gdelt_articles = await fetch_gdelt_articles(
+                keyword=search_term,
+                source_lang="korean",
+                maxrecords=page_size + 5,
+                timespan="3d",     # 기간을 3일로 넓혀 결과 확보
+            )
 
     if gdelt_articles:
         # 본문 추출 (동시 최대 5개) — 느린 사이트가 있어도 전체를 블록하지 않음

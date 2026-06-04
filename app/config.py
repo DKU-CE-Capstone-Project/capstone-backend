@@ -13,6 +13,17 @@ class Settings(BaseSettings):
     newsapi_key: str = ""
     google_api_key: str = ""
     use_mock_news: bool = True
+    # Gemini 모델 — 무료 쿼터는 모델별 독립이므로 한 모델 소진 시 교체 가능
+    gemini_model: str = "gemini-flash-latest"
+
+    # 뉴스 소스 토글: GDELT가 막힌(429/타임아웃) 환경에서는 False로 두어
+    # NewsAPI를 바로 사용 (응답 지연·행 방지). 기본 True(한국어 GDELT 우선).
+    use_gdelt: bool = True
+
+    # LLM 카드 요약 토글: Gemini 무료 티어(5 req/min)에서 검색당 요약 6건이
+    # 쿼터를 소진해 리포트 생성이 fallback 되는 문제 방지. False면 요약은
+    # 기사 description을 그대로 사용하고, Gemini는 리포트/전략에만 사용.
+    use_llm_summaries: bool = True
 
     # ── 클라우드/이벤트 인프라 (CNCF 재구성) ─────────────────────────────
     nats_url: str = "nats://localhost:4222"

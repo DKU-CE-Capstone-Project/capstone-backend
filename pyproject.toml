@@ -11,6 +11,8 @@ dependencies = [
     "pydantic-settings>=2.4",
     "python-dotenv>=1.0",
     "google-generativeai>=0.8",
+    # 신규 google-genai SDK (llm.py가 `from google import genai` 사용) — 컨테이너 필수
+    "google-genai>=1.0",
     # ── 뉴스 수집 파이프라인 ──────────────────────────────────────────────────
     # GDELT DOC API + 로컬 캐시 (requests는 sync 호출 전용, asyncio.to_thread 사용)
     "requests>=2.32",

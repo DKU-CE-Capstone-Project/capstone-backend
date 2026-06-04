@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from app.config import settings
 
-_MODEL_NAME = "gemini-flash-latest"
+
+def _model_name() -> str:
+    return settings.gemini_model
 
 
 def _client():
@@ -15,14 +17,16 @@ def _client():
 
 async def generate(prompt: str) -> str:
     """Generate text via Gemini. Returns empty string on error or missing key."""
-    client = _client()
-    if client is None:
+    if not settings.google_api_key:
         return ""
     try:
+        client = _client()  # SDK import은 try 안에서 — 미설치 시에도 graceful fallback
+        if client is None:
+            return ""
         from google.genai import types as gtypes
 
         resp = await client.aio.models.generate_content(
-            model=_MODEL_NAME,
+            model=_model_name(),
             contents=prompt,
             config=gtypes.GenerateContentConfig(
                 temperature=0.3,
