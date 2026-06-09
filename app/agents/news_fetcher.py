@@ -186,9 +186,9 @@ async def fetch_news(keyword: str, page_size: int = 12) -> list[dict[str, Any]]:
     """기사 목록을 가져옵니다.
 
     전략:
-    1. GDELT DOC API → 뉴스 목록 수집 + 중복 제거
-    2. USE_GDELT=false일 때만 기존 NewsAPI 경로 사용
-    3. USE_MOCK_NEWS=true → fixture 반환
+    1. GDELT DOC API → 뉴스 목록 수집 + 중복 제거 (기본)
+    2. GDELT가 비거나(429/결과없음) USE_GDELT=false → NewsAPI 폴백
+    3. 모든 외부 소스 실패 또는 USE_MOCK_NEWS=true → mock fixture (회복력 안전망)
 
     반환 형식: [{title, url, source, published_at, description, thumbnail_url}]
     """
@@ -213,8 +213,15 @@ async def fetch_news(keyword: str, page_size: int = 12) -> list[dict[str, Any]]:
         if result:
             print(f"[news_fetcher] GDELT: {len(result)} article list items for '{keyword}'")
             return result
-        print(f"[news_fetcher] GDELT returned no article list items for '{keyword}'")
-        return []
+        # GDELT가 비거나 rate limit(429)일 때: NewsAPI 폴백 → 그것도 없으면 mock (회복력 복원)
+        print(f"[news_fetcher] GDELT 결과 없음 → 폴백 시도 for '{keyword}'")
+        if settings.newsapi_key:
+            newsapi_result = await _fetch_newsapi(keyword, page_size)
+            if newsapi_result:
+                print(f"[news_fetcher] NewsAPI 폴백 성공 {len(newsapi_result)}건 for '{keyword}'")
+                return newsapi_result
+        print(f"[news_fetcher] 모든 소스 실패 → mock 반환 for '{keyword}'")
+        return [_normalize(a) for a in _load_mock()]
 
     # ── 2) 명시적으로 GDELT를 끈 경우에만 기존 NewsAPI 경로 사용 ─────────────
     print(f"[news_fetcher] USE_GDELT=false — NewsAPI path for '{keyword}'")
