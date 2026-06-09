@@ -46,7 +46,7 @@ def build_graph(
         Dict matching GraphResponse schema.
     """
     center_id = center.get("news_id") or make_news_id(center.get("url", ""))
-    center_summary = center.get("summary") or center.get("description", "")
+    center_summary = center.get("title", "") or center.get("summary") or center.get("description", "")
 
     center_node = {
         "news_id": center_id,
@@ -62,7 +62,7 @@ def build_graph(
     for i, art in enumerate(related):
         nid = art.get("news_id") or make_news_id(art.get("url", f"unknown-{i}"))
         dist = _distance(center, art) if include_distance else 1
-        summary = art.get("summary") or art.get("description", "")
+        summary = art.get("title", "") or art.get("summary") or art.get("description", "")
 
         nodes.append({
             "news_id": nid,

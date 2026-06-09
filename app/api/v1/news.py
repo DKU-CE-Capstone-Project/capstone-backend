@@ -7,10 +7,10 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
+from app.agents.diffbot_client import extract_articles_with_diffbot
 from app.agents.filter_agent import _content_tokens, _overlap_coefficient
 from app.agents.graph_builder import _relevance_score, build_graph
 from app.agents.news_fetcher import fetch_news
-from app.agents.orchestrator import run_analysis
 from app.schemas import (
     GraphResponse,
     NewsCard,
@@ -49,10 +49,11 @@ def _thumb(art: dict[str, Any], idx: int = 0) -> tuple[str, bool]:
 
 def _to_news_card(art: dict[str, Any], idx: int = 0) -> NewsCard:
     thumb, _ = _thumb(art, idx)
+    title = art.get("title", "")
     return NewsCard(
         news_id=art.get("news_id") or make_news_id(art.get("url", "")),
-        title=art.get("title", ""),
-        summary=art.get("summary") or art.get("description", ""),
+        title=title,
+        summary=title or art.get("summary") or art.get("description", ""),
         thumbnail_url=thumb,
         source_name=art.get("source", ""),
         published_at=art.get("published_at", ""),
@@ -61,20 +62,10 @@ def _to_news_card(art: dict[str, Any], idx: int = 0) -> NewsCard:
 
 
 async def _fetch_and_cache(keyword: str) -> list[dict[str, Any]]:
-    """Run full analysis pipeline and cache results. Returns enriched articles."""
-    result = await run_analysis(keyword)
+    """Fetch news list results and cache them without dropping source thumbnails."""
     raw_articles = [
-        {
-            "title": a.title,
-            "url": a.url,
-            "source": a.source,
-            "published_at": a.published_at,
-            "summary": a.summary,
-            "description": a.summary,
-            "thumbnail_url": "",
-            "_search_keyword": keyword,  # 재검색 시 활용
-        }
-        for a in result.articles
+        {**article, "_search_keyword": keyword}
+        for article in await fetch_news(keyword, page_size=10)
     ]
     return await cache_articles(raw_articles)
 
@@ -171,12 +162,26 @@ async def get_source(news_id: str) -> SourceResponse:
     art = store.news_cache.get(news_id)
     if not art:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
+
+    original_body = art.get("cleaned_content", "")
+    if not original_body and art.get("url"):
+        extracted = await extract_articles_with_diffbot([art], max_articles=1, concurrency=1)
+        if extracted:
+            next_art = {**art, **extracted[0]}
+            original_body = next_art.get("cleaned_content", "")
+            if original_body:
+                next_art["description"] = original_body
+                store.news_cache[news_id] = next_art
+                await cache_articles([next_art])
+                art = next_art
+
     return SourceResponse(
         news_id=news_id,
         source_name=art.get("source", ""),
         source_url=art.get("url", ""),
         published_at=art.get("published_at", ""),
         original_title=art.get("title", ""),
+        original_body=original_body,
     )
 
 
@@ -234,7 +239,7 @@ async def get_related(
             RelatedNewsItem(
                 news_id=art.get("news_id") or make_news_id(art.get("url", "")),
                 title=art.get("title", ""),
-                summary=art.get("summary") or art.get("description", ""),
+                summary=art.get("title", "") or art.get("summary") or art.get("description", ""),
                 thumbnail_url=thumb,
                 relevance_score=score if is_paid else None,
                 distance=1,

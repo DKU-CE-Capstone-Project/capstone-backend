@@ -17,14 +17,20 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GDELT_HEADERS = {
-    "User-Agent": "capstone-gdelt-doc/1.0",
+    "User-Agent": "capstone-gdelt-doc-test/1.0",
     "Accept": "application/json",
 }
 GDELT_CACHE_DIR = Path(__file__).resolve().parents[2] / ".gdelt_cache"
-GDELT_LAST_REQ_FILE = GDELT_CACHE_DIR / "last_request.txt"
+GDELT_LAST_REQ_FILE = GDELT_CACHE_DIR / "test_last_request.txt"
 GDELT_CACHE_TTL = 86400   # 24h
 GDELT_MIN_INTERVAL = 12   # GDELT 속도제한 회피 (초)
 GDELT_MAX_RETRIES = 5
+GDELT_TIMEOUT_SECONDS = 60
+DEFAULT_SEARCH_QUERY = "semiconductor"
+DEFAULT_SOURCE_LANG = "korean"
+DEFAULT_SORT = "hybridrel"
+DEFAULT_MAX_RECORDS = 10
+DEFAULT_TIMESPAN = "1d"
 
 _TRACKING_PARAMS = {"fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "source"}
 
@@ -78,6 +84,32 @@ def _dedupe(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return unique
 
 
+# ── GDELT 요청 파라미터 ─────────────────────────────────────────────────────
+
+def build_doc_query(search_query: str, source_lang: str = DEFAULT_SOURCE_LANG) -> str:
+    search_query = (search_query or DEFAULT_SEARCH_QUERY).strip()
+    if source_lang and "sourcelang:" not in search_query.lower():
+        return f"{search_query} sourcelang:{source_lang}"
+    return search_query
+
+
+def build_gdelt_params(
+    search_query: str = DEFAULT_SEARCH_QUERY,
+    source_lang: str = DEFAULT_SOURCE_LANG,
+    sort: str = DEFAULT_SORT,
+    maxrecords: int = DEFAULT_MAX_RECORDS,
+    timespan: str = DEFAULT_TIMESPAN,
+) -> dict[str, Any]:
+    return {
+        "query": build_doc_query(search_query, source_lang),
+        "mode": "artlist",
+        "format": "json",
+        "sort": sort,
+        "maxrecords": maxrecords,
+        "timespan": timespan,
+    }
+
+
 # ── 로컬 캐시 ─────────────────────────────────────────────────────────────────
 
 def _cache_path(url: str) -> Path:
@@ -99,7 +131,10 @@ def _read_cache(url: str) -> dict | None:
 
 def _write_cache(url: str, payload: dict) -> None:
     GDELT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    _cache_path(url).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    _cache_path(url).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 # ── 속도제한 보호 ─────────────────────────────────────────────────────────────
@@ -125,26 +160,21 @@ def _mark_request() -> None:
 # ── GDELT 동기 호출 (asyncio.to_thread 전용) ─────────────────────────────────
 
 def _fetch_gdelt_sync(
-    query: str,
-    source_lang: str = "korean",
-    sort: str = "hybridrel",
-    maxrecords: int = 20,
-    timespan: str = "1d",
+    query: str = DEFAULT_SEARCH_QUERY,
+    source_lang: str = DEFAULT_SOURCE_LANG,
+    sort: str = DEFAULT_SORT,
+    maxrecords: int = DEFAULT_MAX_RECORDS,
+    timespan: str = DEFAULT_TIMESPAN,
 ) -> dict[str, Any]:
     import requests as req  # sync 전용 — asyncio.to_thread 안에서만 실행
 
-    if source_lang and "sourcelang:" not in query.lower():
-        full_query = f"{query} sourcelang:{source_lang}"
-    else:
-        full_query = query
-    params: dict[str, Any] = {
-        "query": full_query,
-        "mode": "artlist",
-        "format": "json",
-        "sort": sort,
-        "maxrecords": maxrecords,
-        "timespan": timespan,
-    }
+    params = build_gdelt_params(
+        search_query=query,
+        source_lang=source_lang,
+        sort=sort,
+        maxrecords=maxrecords,
+        timespan=timespan,
+    )
 
     # 캐시 확인
     prepared_url = req.Request("GET", GDELT_URL, params=params).prepare().url or GDELT_URL
@@ -156,7 +186,12 @@ def _fetch_gdelt_sync(
     last_response = None
     for attempt in range(GDELT_MAX_RETRIES):
         _wait_rate_limit()
-        resp = req.get(GDELT_URL, params=params, headers=GDELT_HEADERS, timeout=30)
+        resp = req.get(
+            GDELT_URL,
+            params=params,
+            headers=GDELT_HEADERS,
+            timeout=GDELT_TIMEOUT_SECONDS,
+        )
         _mark_request()
         last_response = resp
 
@@ -166,7 +201,12 @@ def _fetch_gdelt_sync(
             _write_cache(prepared_url, payload)
             return payload
 
-        wait = int(resp.headers.get("Retry-After", GDELT_MIN_INTERVAL * (attempt + 1)))
+        retry_after = resp.headers.get("Retry-After")
+        wait = (
+            int(retry_after)
+            if retry_after and retry_after.isdigit()
+            else GDELT_MIN_INTERVAL * (attempt + 1)
+        )
         print(f"[gdelt] 429 rate limit — retry in {wait}s (attempt {attempt+1}/{GDELT_MAX_RETRIES})")
         if attempt < GDELT_MAX_RETRIES - 1:
             time.sleep(wait)
@@ -180,7 +220,7 @@ def _fetch_gdelt_sync(
 async def fetch_gdelt_articles(
     keyword: str,
     source_lang: str = "korean",
-    maxrecords: int = 20,
+    maxrecords: int = DEFAULT_MAX_RECORDS,
     timespan: str = "1d",
 ) -> list[dict[str, Any]]:
     """GDELT DOC API에서 기사 목록을 비동기로 가져오고 중복 제거합니다.

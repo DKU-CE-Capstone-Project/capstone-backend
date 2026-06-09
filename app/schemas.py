@@ -53,6 +53,7 @@ class SourceResponse(BaseModel):
     source_url: str
     published_at: str
     original_title: str
+    original_body: str = ""
 
 
 # ── /api/v1/news/{id}/graph ───────────────────────────────────────────────────

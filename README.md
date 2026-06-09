@@ -31,7 +31,7 @@
 |------|------|
 | 개발 기간 | 2025년 캡스톤 디자인 |
 | 아키텍처 | FastAPI 모놀리식 (MVP), 추후 마이크로서비스 분리 예정 |
-| 데이터 소스 | NewsAPI.org (영문 뉴스, 무료 100req/일) |
+| 데이터 소스 | GDELT DOC API 2.0 (기본), Diffbot Article API (원문 추출), NewsAPI.org (선택 fallback) |
 | AI 모델 | Google Gemini (`gemini-flash-latest`) |
 | 언어 | Python 3.11+ |
 
@@ -63,7 +63,8 @@
 │  │                                                          │   │
 │  │  ① news_fetcher  →  ② filter_agent  →  ③ summarizer    │   │
 │  │       ↓                                      ↓           │   │
-│  │  NewsAPI.org                         ④ keyword_expander  │   │
+│  │  GDELT DOC API 2.0                   ④ keyword_expander  │   │
+│  │  (+ NewsAPI fallback)                         │           │   │
 │  │  (+ KO→EN 번역)                               ↓           │   │
 │  │                                       ⑤ report_generator │   │
 │  │                                               ↓           │   │
@@ -107,7 +108,9 @@ backend/
 │   │
 │   └── agents/
 │       ├── orchestrator.py      # 분석 파이프라인 총괄 (fetch→filter→summarize→expand)
-│       ├── news_fetcher.py      # NewsAPI.org 호출 + KO→EN 키워드 번역
+│       ├── news_fetcher.py      # GDELT 기반 뉴스 목록 수집 + NewsAPI fallback
+│       ├── gdelt_client.py      # GDELT DOC API 2.0 호출, 중복 제거, 로컬 캐시
+│       ├── diffbot_client.py    # Diffbot Article API 원문 본문 추출
 │       ├── filter_agent.py      # URL/제목 중복 제거 (overlap coefficient)
 │       ├── summarizer.py        # Gemini 기사 요약 (한국어 1문장)
 │       ├── keyword_expander.py  # Gemini 관련 키워드 5~7개 생성
@@ -133,10 +136,12 @@ backend/
 |------|------|------|------|
 | 웹 프레임워크 | FastAPI | ≥0.115 | REST API 서버 |
 | ASGI 서버 | uvicorn | ≥0.30 | 비동기 HTTP 서버 |
-| HTTP 클라이언트 | httpx | ≥0.27 | NewsAPI.org 비동기 호출 |
+| HTTP 클라이언트 | httpx / requests | ≥0.27 / ≥2.32 | NewsAPI fallback, GDELT/Diffbot 동기 호출 |
 | 데이터 검증 | pydantic / pydantic-settings | ≥2.7 | 스키마 정의 및 환경변수 로드 |
 | AI 모델 | google-genai | latest | Gemini API (요약·리포트·전략) |
-| 뉴스 데이터 | NewsAPI.org | v2 | 영문 뉴스 수집 |
+| 뉴스 데이터 | GDELT DOC API 2.0 | v2 | 한국어 뉴스 목록 수집 |
+| 원문 추출 | Diffbot Article API | v3 | 뉴스 상세 원문 본문 추출 |
+| 뉴스 fallback | NewsAPI.org | v2 | `USE_GDELT=false`일 때 영문 뉴스 수집 |
 | 테스트 | pytest + pytest-asyncio | ≥8.0 | 비동기 통합 테스트 |
 | 린터 | ruff | ≥0.6 | 코드 스타일 검사 |
 
@@ -154,11 +159,12 @@ backend/
 │ ① news_fetcher.py                                   │
 │                                                     │
 │  KO→EN 번역: "트럼프 관세" → "trump tariff"          │
-│  NewsAPI 호출: GET /v2/everything                    │
-│   - searchIn=title,description (관련 기사 필터링)    │
-│   - sortBy=publishedAt, language=en                  │
-│   - 결과 없으면 language 제한 제거 후 재시도          │
-│  후처리: 검색어가 title/description에 포함된 것만 유지│
+│  기본 경로: GDELT DOC API 2.0 mode=artlist 호출      │
+│   - sourcelang:korean, sort=hybridrel, timespan=1d   │
+│   - URL/제목 정규화 기반 중복 제거                   │
+│   - socialimage를 thumbnail_url로 보존               │
+│  USE_GDELT=false일 때만 NewsAPI.org fallback 사용    │
+│  USE_MOCK_NEWS=true 또는 DEMO_MODE=true면 fixture 사용│
 │                                                     │
 │  Output: List[{title, url, source, published_at,    │
 │                description, thumbnail_url}]          │
@@ -257,7 +263,7 @@ GET /api/v1/news/{news_id}/graph
    (3건 이상이면 API 재호출 없이 반환)
     │ (3건 미만)
     ▼
-③ 원래 검색 키워드로 NewsAPI 재호출 (최대 12건)
+③ 원래 검색 키워드로 뉴스 소스 재조회 (GDELT 기본, NewsAPI fallback)
     │
     ▼
 ④ graph_builder.build_graph()
@@ -283,11 +289,11 @@ GraphResponse {
 ### 6.1 검색 → 카드 표시
 
 ```
-[Client]                [FastAPI]              [NewsAPI]    [Gemini]
+[Client]                [FastAPI]              [GDELT]      [Gemini]
    │                       │                      │             │
    │ GET /news/search?q=X  │                      │             │
    │──────────────────────▶│                      │             │
-   │                       │ GET /v2/everything   │             │
+   │                       │ GET /api/v2/doc/doc  │             │
    │                       │─────────────────────▶│             │
    │                       │ [{title,url,...}]    │             │
    │                       │◀─────────────────────│             │
@@ -480,9 +486,12 @@ GET /api/v1/news/{news_id}/source
   "source_name": "Crypto Briefing",
   "source_url": "https://cryptobriefing.com/...",
   "published_at": "2026-05-09T05:41:08Z",
-  "original_title": "Nvidia appoints former Goldman Sachs Vice Chairman to board"
+  "original_title": "Nvidia appoints former Goldman Sachs Vice Chairman to board",
+  "original_body": "Diffbot Article API로 추출한 원문 본문. 토큰이 없거나 추출 실패 시 빈 문자열"
 }
 ```
+
+`original_body`가 캐시에 없고 Diffbot 토큰이 설정되어 있으면, 이 엔드포인트는 해당 기사 URL을 Diffbot Article API로 1건 추출한 뒤 `cleaned_content`를 캐시에 저장합니다.
 
 ---
 
@@ -500,7 +509,7 @@ GET /api/v1/news/{news_id}/thumbnail
 }
 ```
 
-> `fallback_used: true` — NewsAPI가 이미지를 제공하지 않아 Unsplash 대체 이미지 사용
+> `fallback_used: true` — GDELT/NewsAPI가 이미지를 제공하지 않아 Unsplash 대체 이미지 사용
 
 ---
 
@@ -678,9 +687,10 @@ Content-Type: application/json
     "url": "https://...",
     "source": "Crypto Briefing",
     "published_at": "2026-05-09T05:41:08Z",
-    "description": "원문 설명",
+    "description": "원문 설명 또는 Diffbot으로 추출한 본문",
     "summary": "엔비디아가 골드만삭스 전 부회장을...",  # Gemini 생성
-    "thumbnail_url": "https://...",   # NewsAPI urlToImage (없으면 "")
+    "thumbnail_url": "https://...",   # GDELT socialimage 또는 NewsAPI urlToImage (없으면 "")
+    "cleaned_content": "Diffbot 원문 본문",  # source 조회 후 있을 수 있음
     "_search_keyword": "엔비디아",    # 재검색용 원래 키워드
 }
 ```
@@ -732,7 +742,7 @@ selection_cache: dict[str, dict]  # selection_id (UUID4) → 선택 묶음
 /news/{id}/graph 호출
     → news_cache[news_id] 조회       ← 재활용
     → 동일 키워드 캐싱 기사 반환
-    → (부족 시) NewsAPI 재호출
+    → (부족 시) 뉴스 소스 재조회
 ```
 
 ---
@@ -776,16 +786,22 @@ def tier_ok(user_tier: str, required: str) -> bool:
 `.env` 파일을 프로젝트 루트(`Capstone/`)에 생성합니다.
 
 ```env
-NEWSAPI_KEY=your_newsapi_org_key       # NewsAPI.org 발급 키
 GOOGLE_API_KEY=your_google_ai_key      # Google AI Studio 발급 키
+USE_GDELT=true                         # true면 GDELT DOC API 2.0 사용
 USE_MOCK_NEWS=false                    # true로 설정 시 fixture 사용
+NEWSAPI_KEY=your_newsapi_org_key       # USE_GDELT=false일 때만 사용
+DIFFBOT_API_KEY=your_diffbot_token     # 선택: /news/{id}/source 원문 본문 추출
 ```
 
 | 변수 | 필수 | 없을 때 동작 |
 |------|------|-------------|
-| `NEWSAPI_KEY` | 권장 | `USE_MOCK_NEWS=true`로 강제 전환, fixture 뉴스 반환 |
+| `USE_GDELT` | — | 기본 `true`, GDELT DOC API 2.0 사용 |
+| `NEWSAPI_KEY` | 선택 | `USE_GDELT=false`인 경우 NewsAPI fallback 호출 실패 |
+| `DIFFBOT_API_KEY` / `DIFFBOT_TOKEN` | 선택 | 원문 본문 추출을 건너뛰고 기존 기사 정보만 반환 |
 | `GOOGLE_API_KEY` | 권장 | Gemini 호출 건너뜀, 설명 기반 fallback 사용 |
 | `USE_MOCK_NEWS` | — | 기본 `false` |
+
+Diffbot 토큰은 환경 변수 외에도 `../token.env`, `token.env`, `diffbot/token.txt` 순서로 탐색합니다.
 
 **Gemini 없을 때 fallback 동작**
 
@@ -803,8 +819,9 @@ USE_MOCK_NEWS=false                    # true로 설정 시 fixture 사용
 ### 요구사항
 
 - Python 3.11+
-- NewsAPI.org 무료 API 키 ([발급](https://newsapi.org/register))
 - Google AI Studio API 키 ([발급](https://aistudio.google.com))
+- Diffbot API 키 (선택, 원문 본문 추출용)
+- NewsAPI.org API 키 (선택, `USE_GDELT=false` fallback용)
 
 ### 설치 및 실행
 
@@ -822,9 +839,13 @@ pip install -e .
 
 # 4. 환경 변수 설정 (프로젝트 루트에 .env 파일 생성)
 cat > ../.env << 'EOF'
-NEWSAPI_KEY=your_newsapi_key_here
 GOOGLE_API_KEY=your_google_api_key_here
+USE_GDELT=true
 USE_MOCK_NEWS=false
+# 선택
+DIFFBOT_API_KEY=your_diffbot_token_here
+# USE_GDELT=false일 때만 필요
+NEWSAPI_KEY=your_newsapi_key_here
 EOF
 
 # 5. 서버 실행
@@ -903,9 +924,11 @@ pytest tests/ -v
 | 단계 | 기능 | 상태 |
 |------|------|------|
 | v1.0 | 기본 파이프라인 + `/api/v1` 전체 엔드포인트 | ✅ 완료 |
-| v1.1 | 한국투자증권 MCP 연동 (실시간 시세) | 🔜 예정 |
-| v1.2 | RAG 도입 (ChromaDB 벡터 검색) | 🔜 예정 |
-| v1.3 | Google ADK SequentialAgent 전환 | 🔜 예정 |
+| v1.1 | GDELT 기반 한국어 뉴스 수집 + Diffbot 원문 추출 | ✅ 완료 |
+| v1.2 | GDELT Cloud API 교체 검토 (DOC API 2.0 rate limit/RPM 불명확성 대응) | 🔜 예정 |
+| v1.3 | 한국투자증권 MCP 연동 (실시간 시세) | 🔜 예정 |
+| v1.4 | RAG 도입 (ChromaDB 벡터 검색) | 🔜 예정 |
+| v1.5 | Google ADK SequentialAgent 전환 | 🔜 예정 |
 | v2.0 | 사용자 인증 (JWT) + PostgreSQL 영속화 | 📋 계획 |
 | v2.1 | Docker 컨테이너화 + 클라우드 배포 | 📋 계획 |
 
