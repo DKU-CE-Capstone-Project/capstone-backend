@@ -78,7 +78,7 @@ async def _related_articles(news_id: str, extra: int = 8) -> list[dict[str, Any]
     1. Return other cached articles from the same search (same _search_keyword).
     2. If fewer than 3, re-fetch using the original search keyword.
     """
-    center = store.news_cache.get(news_id)
+    center = await store.get_news(news_id)
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found. Search first.")
 
@@ -147,7 +147,7 @@ async def news_cards(
 @router.get("/{news_id}/thumbnail", response_model=ThumbnailResponse)
 async def get_thumbnail(news_id: str) -> ThumbnailResponse:
     """뉴스 카드 썸네일 이미지를 반환합니다."""
-    art = store.news_cache.get(news_id)
+    art = await store.get_news(news_id)
     if not art:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
     thumb, fallback = _thumb(art)
@@ -159,7 +159,7 @@ async def get_thumbnail(news_id: str) -> ThumbnailResponse:
 @router.get("/{news_id}/source", response_model=SourceResponse)
 async def get_source(news_id: str) -> SourceResponse:
     """뉴스 원문 출처 및 링크를 반환합니다."""
-    art = store.news_cache.get(news_id)
+    art = await store.get_news(news_id)
     if not art:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
@@ -195,7 +195,7 @@ async def get_graph(
     include_distance: bool = Query(default=True),
 ) -> GraphResponse:
     """마인드맵 데이터를 반환합니다."""
-    center = store.news_cache.get(news_id)
+    center = await store.get_news(news_id)
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
@@ -220,7 +220,7 @@ async def get_related(
     FREE: 최대 3개, relevance_score 미포함.
     PAID: 제한 없음 + relevance_score 포함.
     """
-    center = store.news_cache.get(news_id)
+    center = await store.get_news(news_id)
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
@@ -262,7 +262,7 @@ async def create_selection(
 
     selected = []
     for nid in body.news_ids:
-        art = store.news_cache.get(nid)
+        art = await store.get_news(nid)
         if art:
             selected.append({"news_id": nid, "title": art.get("title", "")})
 
@@ -294,7 +294,7 @@ async def get_relations(
     if not tier_ok(tier, "PAID"):
         raise HTTPException(status_code=403, detail="PAID 플랜이 필요합니다.")
 
-    source_art = store.news_cache.get(news_id)
+    source_art = await store.get_news(news_id)
     if not source_art:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
@@ -302,7 +302,7 @@ async def get_relations(
     relations: list[RelationScore] = []
 
     for tid in targets:
-        target_art = store.news_cache.get(tid)
+        target_art = await store.get_news(tid)
         if not target_art:
             continue
         score = _relevance_score(source_art, target_art)

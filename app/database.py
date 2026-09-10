@@ -121,16 +121,28 @@ def news_doc_from_article(art: dict[str, Any]) -> dict[str, Any]:
     return doc
 
 
+def _iso_z(value: Any) -> str:
+    """BSON date → API 가 쓰는 ISO-8601 Z 문자열.
+
+    pymongo/motor 는 BSON date 를 **naive** datetime(UTC 기준)으로 돌려준다.
+    그대로 isoformat() 하면 오프셋이 없어 'Z' 가 빠지고, 프론트가 그걸 로컬시각으로
+    해석해 시간이 밀린다. 메모리 경로가 내는 '...Z' 와 형식을 맞춘다.
+    """
+    if not isinstance(value, datetime):
+        return ""
+    dt = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def article_from_news_doc(doc: dict[str, Any]) -> dict[str, Any]:
     """news 문서 → in-memory/API 형태. 읽기 경로를 붙일 때 이걸 쓴다."""
-    published = doc.get("published_at")
     source = doc.get("source") or {}
     return {
         "news_id": doc.get("news_id", ""),
         "title": doc.get("title", ""),
         "url": doc.get("url", ""),
         "source": source.get("name", "") if isinstance(source, dict) else (source or ""),
-        "published_at": published.isoformat().replace("+00:00", "Z") if isinstance(published, datetime) else "",
+        "published_at": _iso_z(doc.get("published_at")),
         "description": doc.get("summary", ""),
         "summary": doc.get("summary", ""),
         "thumbnail_url": doc.get("thumbnail_url", ""),
@@ -301,6 +313,31 @@ async def get_news(news_id: str) -> dict[str, Any] | None:
     try:
         doc = await db[NEWS].find_one({"news_id": news_id}, {"_id": 0, "embedding": 0})
         return article_from_news_doc(doc) if doc else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def get_report(report_id: str) -> dict[str, Any] | None:
+    """report_id 로 조회. reports 는 앱 형태 그대로 저장되므로 변환이 필요 없다.
+
+    (설계 형태로 옮기는 건 작업범위 3 잔여분이다 — validator 가 아직 warn 인 이유)
+    """
+    db = _get_db()
+    if db is None:
+        return None
+    try:
+        return await db[REPORTS].find_one({"report_id": report_id}, {"_id": 0})
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def get_strategy(strategy_id: str) -> dict[str, Any] | None:
+    """strategy_id 로 조회. reports 와 같은 이유로 변환 없음."""
+    db = _get_db()
+    if db is None:
+        return None
+    try:
+        return await db[STRATEGIES].find_one({"strategy_id": strategy_id}, {"_id": 0})
     except Exception:  # noqa: BLE001
         return None
 

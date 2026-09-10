@@ -16,7 +16,7 @@ router = APIRouter()
 @router.post("", response_model=StrategyCreateResponse, status_code=201)
 async def create_strategy(body: StrategyCreateRequest) -> StrategyCreateResponse:
     """리포트를 바탕으로 투자 전략을 생성합니다."""
-    report = store.report_cache.get(body.report_id)
+    report = await store.get_report(body.report_id)
     if not report:
         raise HTTPException(
             status_code=404,
@@ -54,7 +54,7 @@ async def create_strategy(body: StrategyCreateRequest) -> StrategyCreateResponse
 @router.get("/{strategy_id}", response_model=StrategyResponse)
 async def get_strategy(strategy_id: str) -> StrategyResponse:
     """생성된 투자 전략 결과를 조회합니다."""
-    strategy = store.strategy_cache.get(strategy_id)
+    strategy = await store.get_strategy(strategy_id)
     if not strategy:
         raise HTTPException(status_code=404, detail=f"strategy_id '{strategy_id}' not found.")
     return StrategyResponse(**strategy)
