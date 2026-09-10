@@ -19,6 +19,7 @@ async def cache_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]
     MongoDB with a Gemini embedding for vector search. Returns enriched list.
 
     in-memory store는 L1 캐시(즉시 응답용). MongoDB 영속화/임베딩은 use_mongodb 시에만.
+    반환하는 dict 는 기존 형태 그대로다 — 설계 스키마 변환은 Mongo 저장 직전에만 한다.
     """
     enriched: list[dict[str, Any]] = []
     for art in articles:
@@ -35,17 +36,23 @@ async def cache_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 async def _persist_to_mongo(enriched: list[dict[str, Any]]) -> None:
-    """각 기사에 임베딩 부여 후 MongoDB articles에 write-through (벡터검색 근거)."""
+    """각 기사에 임베딩 부여 후 MongoDB news에 write-through (벡터검색 근거).
+
+    in-memory dict 를 그대로 넣지 않고 database.news_doc_from_article() 로
+    「구조크」news 스키마에 맞춰 변환한다. 그러지 않으면 mongo-init 의 validator 가
+    거부한다(source 가 문자열, 날짜가 ISO 문자열, 필수 필드 누락).
+    in-memory/API 응답 형태는 건드리지 않으므로 프론트는 영향 없다.
+    """
     from app import database
     from app.agents.llm import embed
 
     async def _one(art: dict[str, Any]) -> None:
         text = f"{art.get('title','')} {art.get('summary') or art.get('description','')}".strip()
         vec = await embed(text)
-        doc = {k: v for k, v in art.items()}
+        doc = database.news_doc_from_article(art)
         if vec:
             doc["embedding"] = vec
-        await database.save_article(doc)
+        await database.save_news(doc)
 
     try:
         await asyncio.gather(*(_one(a) for a in enriched))
