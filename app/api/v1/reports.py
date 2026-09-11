@@ -11,6 +11,7 @@ from app.agents.report_generator import generate_report
 from app.agents.critic import verify_report
 from app import database, store
 from app.schemas import ReportCreateRequest, ReportCreateResponse, ReportResponse
+from app.utils import resolve_news
 
 router = APIRouter()
 
@@ -27,7 +28,7 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
 
     같은 뉴스(+연관셋)에 대한 리포트가 이미 있으면 LLM 재호출 없이 재사용합니다(캐싱).
     """
-    center = store.news_cache.get(body.news_id)
+    center = await resolve_news(body.news_id)
     if not center:
         raise HTTPException(
             status_code=404,
@@ -45,11 +46,12 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
             created_at=store.report_cache[existing_id].get("created_at", ""),
         )
 
-    related = [
-        store.news_cache[nid]
-        for nid in body.related_news_ids
-        if nid in store.news_cache
-    ]
+    resolved_related: list[tuple[str, dict]] = []
+    for nid in body.related_news_ids:
+        art = await resolve_news(nid)
+        if art:
+            resolved_related.append((nid, art))
+    related = [art for _, art in resolved_related]
 
     report_data = await generate_report(center, related)
 
@@ -72,9 +74,8 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
         "evidence_news": [
             {"news_id": body.news_id, "title": center.get("title", "")}
         ] + [
-            {"news_id": nid, "title": store.news_cache[nid].get("title", "")}
-            for nid in body.related_news_ids
-            if nid in store.news_cache
+            {"news_id": nid, "title": art.get("title", "")}
+            for nid, art in resolved_related
         ],
         "risk_factors": report_data["risk_factors"],
         "rag_sources": report_data.get("rag_sources", []),
@@ -96,6 +97,11 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
 async def get_report(report_id: str) -> ReportResponse:
     """생성된 AI 리포트 결과를 조회합니다."""
     report = store.report_cache.get(report_id)
+    if not report:
+        # api 프로세스를 재시작하거나 여러 개로 띄우면 in-memory 캐시가 비어 있다.
+        report = await database.get_report(report_id)
+        if report:
+            store.report_cache[report_id] = report  # L1 캐시 재적재
     if not report:
         raise HTTPException(status_code=404, detail=f"report_id '{report_id}' not found.")
     return ReportResponse(**report)

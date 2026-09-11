@@ -203,3 +203,119 @@ def test_analyze_with_mocked_news(monkeypatch) -> None:
     related = body["related_keywords"]
     assert isinstance(related, list)
     assert len(related) >= 1
+
+
+# ── 설계 스키마 매핑 (Notion "설계 › 데이터베이스 › 구조크") ────────────────────
+
+
+def test_to_news_document_matches_design_schema() -> None:
+    """앱 내부 dict → 설계 `news` 문서 변환이 validator 요구사항을 만족하는지."""
+    from datetime import datetime
+
+    from app.utils import to_news_document
+
+    doc = to_news_document({
+        "news_id": "abc123",
+        "title": "Nvidia earnings beat",
+        "url": "https://www.example.com/news/1?utm_source=x",
+        "source": "Reuters",
+        "published_at": "2026-06-04T01:02:03Z",
+        "description": "본문",
+        "summary": "한 줄 요약",
+        "thumbnail_url": "https://example.com/a.jpg",
+        "_search_keyword": "nvidia",
+    })
+
+    # mongo-init/01-collections.js의 news.required 와 일치해야 한다
+    for field in (
+        "news_id", "url", "title", "source", "status",
+        "language", "is_deleted", "collected_at", "created_at", "updated_at",
+    ):
+        assert field in doc, f"required 필드 누락: {field}"
+
+    # 설계는 source를 {name, domain} 객체로 정의한다 (앱 내부는 문자열)
+    assert doc["source"] == {"name": "Reuters", "domain": "www.example.com"}
+    # 설계의 published_at은 date 타입 — 문자열이면 validator가 거부한다
+    assert isinstance(doc["published_at"], datetime)
+    assert isinstance(doc["collected_at"], datetime)
+    assert doc["status"] == "collected"
+    assert doc["is_deleted"] is False
+    assert doc["content"] == "본문"
+
+
+def test_to_news_document_tolerates_unparsable_date() -> None:
+    """발행일시 형식이 깨져도 문서 생성은 계속돼야 한다 (published_at은 null 허용)."""
+    from app.utils import to_news_document
+
+    doc = to_news_document({"url": "https://example.com/x", "published_at": "언제인지 모름"})
+    assert doc["published_at"] is None
+
+
+def test_from_news_document_restores_app_shape() -> None:
+    """설계 문서 → 앱 내부 dict 복원 (캐시 미스 폴백 경로)."""
+    from app.utils import from_news_document, to_news_document
+
+    original = {
+        "news_id": "abc123",
+        "title": "제목",
+        "url": "https://example.com/news/1",
+        "source": "Bloomberg",
+        "published_at": "2026-06-04T01:02:03+00:00",
+        "description": "본문",
+        "_search_keyword": "반도체",
+    }
+    restored = from_news_document(to_news_document(original))
+
+    assert restored["news_id"] == "abc123"
+    assert restored["title"] == "제목"
+    assert restored["source"] == "Bloomberg"        # 객체 → 문자열로 되돌아온다
+    assert restored["description"] == "본문"
+    assert restored["_search_keyword"] == "반도체"
+    assert restored["published_at"].startswith("2026-06-04T01:02:03")
+
+
+async def test_resolve_news_falls_back_to_mongodb(monkeypatch) -> None:
+    """in-memory 캐시에 없으면 MongoDB에서 복원하고 L1 캐시를 다시 채운다.
+
+    api 프로세스 재시작 후 GET /api/v1/news/{id}/* 가 404 나던 문제를 막는 경로.
+    """
+    from app import database
+    from app.utils import resolve_news, to_news_document
+
+    news_id = "restored001"
+    store.news_cache.pop(news_id, None)
+
+    stored = to_news_document({
+        "news_id": news_id,
+        "title": "복원된 기사",
+        "url": "https://example.com/restored",
+        "source": "Example",
+        "published_at": "2026-06-04T01:02:03Z",
+        "description": "본문",
+        "_search_keyword": "복원",
+    })
+
+    async def fake_get_news(nid: str):
+        return stored if nid == news_id else None
+
+    monkeypatch.setattr(database, "get_news", fake_get_news)
+
+    art = await resolve_news(news_id)
+
+    assert art is not None
+    assert art["title"] == "복원된 기사"
+    # L1 캐시에 다시 적재되어 다음 조회는 DB를 타지 않는다
+    assert store.news_cache[news_id]["title"] == "복원된 기사"
+
+
+async def test_resolve_news_returns_none_when_absent(monkeypatch) -> None:
+    from app import database
+    from app.utils import resolve_news
+
+    async def fake_get_news(nid: str):
+        return None
+
+    monkeypatch.setattr(database, "get_news", fake_get_news)
+    store.news_cache.pop("nope", None)
+
+    assert await resolve_news("nope") is None

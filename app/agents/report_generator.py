@@ -64,7 +64,7 @@ async def retrieve_rag_articles(center: dict[str, Any], k: int = 3) -> list[dict
     vec = await embed(text)
     if not vec:
         return []
-    return await database.vector_search_articles(vec, k=k, exclude_id=center.get("news_id", ""))
+    return await database.vector_search_news(vec, k=k, exclude_id=center.get("news_id", ""))
 
 
 def _rag_block(rag_articles: list[dict[str, Any]]) -> str:
