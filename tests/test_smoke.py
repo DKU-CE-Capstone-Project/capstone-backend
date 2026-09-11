@@ -319,3 +319,80 @@ async def test_resolve_news_returns_none_when_absent(monkeypatch) -> None:
     store.news_cache.pop("nope", None)
 
     assert await resolve_news("nope") is None
+
+
+def test_relations_endpoint_persists_to_news_relations(monkeypatch) -> None:
+    """연관도 점수를 계산하면 설계 news_relations 스키마로 저장돼야 한다.
+
+    12주차 회의에서 "릴레이션까지는 저장하자"(매 요청 재계산 방지)고 결정된 항목.
+    """
+    from app import database
+
+    src = {
+        "news_id": "rel_src",
+        "title": "Nvidia HBM supply expands for AI servers",
+        "description": "Nvidia HBM supply",
+        "url": "https://example.com/rel-src",
+    }
+    tgt = {
+        "news_id": "rel_tgt",
+        "title": "HBM supply shortage hits AI servers",
+        "description": "HBM supply shortage",
+        "url": "https://example.com/rel-tgt",
+    }
+    store.news_cache["rel_src"] = src
+    store.news_cache["rel_tgt"] = tgt
+
+    saved: list[dict] = []
+
+    async def fake_save_relation(doc):
+        saved.append(doc)
+
+    monkeypatch.setattr(database, "save_relation", fake_save_relation)
+
+    resp = client.get(
+        "/api/v1/news/rel_src/relations?target_news_ids=rel_tgt&tier=PAID"
+    )
+    assert resp.status_code == 200
+
+    assert len(saved) == 1, "연관도 저장이 호출되지 않았다"
+    doc = saved[0]
+    # mongo-init/01-collections.js의 news_relations.required 와 일치해야 한다
+    for field in ("source_news_id", "target_news_id", "relation", "created_at", "updated_at"):
+        assert field in doc, f"required 필드 누락: {field}"
+    assert doc["source_news_id"] == "rel_src"
+    assert doc["target_news_id"] == "rel_tgt"
+    # relation.type은 설계의 6종 enum 중 하나여야 한다
+    assert doc["relation"]["type"] in {
+        "same_topic", "cause_effect", "same_company",
+        "same_industry", "opposite_view", "follow_up",
+    }
+    assert doc["relation"]["score"] > 0
+    assert isinstance(doc["shared_keywords"], list)
+
+
+def test_relations_endpoint_skips_unrelated_pair(monkeypatch) -> None:
+    """겹치는 토큰이 없으면 관계로 저장하지 않는다."""
+    from app import database
+
+    store.news_cache["norel_a"] = {
+        "news_id": "norel_a", "title": "Nvidia earnings", "description": "",
+        "url": "https://example.com/a",
+    }
+    store.news_cache["norel_b"] = {
+        "news_id": "norel_b", "title": "제주 감귤 작황", "description": "",
+        "url": "https://example.com/b",
+    }
+
+    saved: list[dict] = []
+
+    async def fake_save_relation(doc):
+        saved.append(doc)
+
+    monkeypatch.setattr(database, "save_relation", fake_save_relation)
+
+    resp = client.get(
+        "/api/v1/news/norel_a/relations?target_news_ids=norel_b&tier=PAID"
+    )
+    assert resp.status_code == 200
+    assert saved == []

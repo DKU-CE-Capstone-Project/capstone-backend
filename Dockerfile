@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml ./
 COPY app ./app
 COPY fixtures ./fixtures
+# 운영 스크립트 (시드 등): docker compose exec econmind-api python scripts/seed_mongo.py
+COPY scripts ./scripts
 RUN pip install --no-cache-dir .
 
 EXPOSE 8000

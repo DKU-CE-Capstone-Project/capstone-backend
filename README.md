@@ -32,7 +32,8 @@
 | 개발 기간 | 2025년 캡스톤 디자인 |
 | 아키텍처 | FastAPI 모놀리식 (MVP), 추후 마이크로서비스 분리 예정 |
 | 데이터 소스 | GDELT DOC API 2.0 (기본), Diffbot Article API (원문 추출), NewsAPI.org (선택 fallback) |
-| AI 모델 | Google Gemini (`gemini-flash-latest`) |
+| AI 모델 | Claude (`anthropic_api_key` 있을 때 우선) → Gemini fallback. 임베딩은 항상 Gemini |
+| 데이터베이스 | MongoDB (자체 호스팅 / `mongodb-atlas-local` 컨테이너) + 벡터검색 |
 | 언어 | Python 3.11+ |
 
 ---
@@ -803,6 +804,43 @@ DIFFBOT_API_KEY=your_diffbot_token     # 선택: /news/{id}/source 원문 본문
 
 Diffbot 토큰은 환경 변수 외에도 `../token.env`, `token.env`, `diffbot/token.txt` 순서로 탐색합니다.
 
+### MongoDB (영속화 + 벡터검색)
+
+```env
+USE_MONGODB=true
+MONGODB_URI=mongodb://<user>:<pw>@mongodb:27017/capstone_news?authSource=capstone_news
+MONGODB_DB_NAME=capstone_news
+USE_RAG=true                           # 리포트 생성 시 벡터검색으로 근거 주입
+USE_CRITIC=true                        # 생성된 리포트를 검증 에이전트로 점검
+EMBEDDING_MODEL=gemini-embedding-001   # 768차원 — 벡터 인덱스와 반드시 일치
+```
+
+| 변수 | 필수 | 없을 때 동작 |
+|------|------|-------------|
+| `USE_MONGODB` | — | 기본 `false`. 전 기능이 in-memory로만 동작(재시작 시 유실) |
+| `MONGODB_URI` | `USE_MONGODB=true`일 때 | 연결 실패 시 자동 비활성화, 서비스는 정상 기동 |
+| `USE_RAG` | — | `false`면 벡터검색 근거 없이 리포트 생성 |
+
+컨테이너 구성과 스키마 초기화는 `capstone-deploy/` 를 참고하세요
+(`docker-compose.yaml`의 `mongodb` 서비스 + `mongo-init/*.js`).
+
+컬렉션은 Notion `설계 › 데이터베이스 › 구조크`의 8개를 따릅니다.
+
+| 컬렉션 | 구현 | 비고 |
+|---|---|---|
+| `news` | ✅ | 수집 기사 + `embedding`(벡터검색 대상) |
+| `news_relations` | ✅ | 연관도 점수 캐시. 관계 유형은 `same_topic`만 판별 |
+| `reports` | ✅ | `sections`는 설계 7개 중 `summary`/`risk_analysis`만 채움 |
+| `strategies` | ✅ | 종목 추천만. `backtest` 블록 미구현 |
+| `news_analysis` | ⬜ | 뉴스 단위 분석 파이프라인 미구현 |
+| `mindmaps` | ⬜ | 설계상 DB 미사용 — 쿠키/세션으로 처리 (세션 식별 미구현) |
+| `jobs` | ⬜ | Redis(`job:{id}`)로 대체 구현 |
+| `users` | ⬜ | 로그인 미구현 |
+
+> in-memory `store`는 L1 캐시로 유지하고, 미스 시 MongoDB로 폴백합니다
+> (`app/utils.py:resolve_news`). 덕분에 api 프로세스를 재시작하거나 여러 개로 띄워도
+> 리포트·전략 조회가 404로 떨어지지 않습니다.
+
 **Gemini 없을 때 fallback 동작**
 
 | 기능 | Fallback |
@@ -925,12 +963,23 @@ pytest tests/ -v
 |------|------|------|
 | v1.0 | 기본 파이프라인 + `/api/v1` 전체 엔드포인트 | ✅ 완료 |
 | v1.1 | GDELT 기반 한국어 뉴스 수집 + Diffbot 원문 추출 | ✅ 완료 |
-| v1.2 | GDELT Cloud API 교체 검토 (DOC API 2.0 rate limit/RPM 불명확성 대응) | 🔜 예정 |
-| v1.3 | 한국투자증권 MCP 연동 (실시간 시세) | 🔜 예정 |
-| v1.4 | RAG 도입 (ChromaDB 벡터 검색) | 🔜 예정 |
-| v1.5 | Google ADK SequentialAgent 전환 | 🔜 예정 |
-| v2.0 | 사용자 인증 (JWT) + PostgreSQL 영속화 | 📋 계획 |
-| v2.1 | Docker 컨테이너화 + 클라우드 배포 | 📋 계획 |
+| v1.2 | RAG 도입 — MongoDB 벡터검색 + critic 검증 에이전트 | ✅ 완료 |
+| v1.3 | Docker 컨테이너화 + NATS/Redis 비동기 분리 | ✅ 완료 |
+| v1.4 | MongoDB 자체 호스팅 전환 + 설계 스키마 정합화 | ✅ 완료 |
+| v1.5 | 쿠키/세션 기반 사용자 식별 (사용자별 마인드맵) | 🔜 예정 |
+| v1.6 | GDELT Cloud API 교체 검토 (DOC API 2.0 rate limit/RPM 불명확성 대응) | 🔜 예정 |
+| v1.7 | 종목 추출 에이전트 (`related_tickers` / `stock_impact`) | 🔜 예정 |
+| v1.8 | 한국투자증권 MCP 연동 (실시간 시세) | 🔜 예정 |
+| v1.9 | 전략 백테스트 (`logic` / `parameters` / `backtest`) | 🔜 예정 |
+| v2.0 | Google ADK SequentialAgent 전환 (완전 자율 에이전트) | 📋 계획 |
+| v2.1 | 사용자 인증 (JWT) + `users` 컬렉션 활성화 | 📋 계획 |
+
+> RAG는 당초 ChromaDB를 검토했으나 **MongoDB 벡터검색**으로 구현했다. 영속화와 벡터검색을
+> 한 컴포넌트가 담당해 운영 부담이 줄고, 설계 문서의 데이터 계층과도 일치한다.
+> 영속화 DB 역시 PostgreSQL 대신 MongoDB로 확정되었다 (12주차 회의).
+>
+> 미구현 항목의 근거 스키마는 Notion `설계 › 데이터베이스 › 구조크`에 이미 정의되어 있고,
+> `capstone-deploy/mongo-init/01-collections.js`의 validator에 TODO로 표시해 두었다.
 
 ### 한국투자증권 MCP 연동 구조 (예정)
 

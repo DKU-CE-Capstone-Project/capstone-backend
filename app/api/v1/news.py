@@ -119,6 +119,42 @@ async def _related_articles(news_id: str, extra: int = 8) -> list[dict[str, Any]
     return [a for a in enriched if a.get("news_id") != news_id]
 
 
+# 연관도 점수를 news_relations에 캐시한다 (12주차 회의 "릴레이션까지는 저장하자" 결정).
+# 같은 (source, target) 쌍은 uniq_news_relations_pair 인덱스로 upsert된다.
+_RELATION_MIN_SCORE = 0.0
+
+
+async def _persist_relation(
+    source_id: str,
+    target_id: str,
+    score: float,
+    reason: str,
+    shared_keywords: list[str],
+) -> None:
+    """계산된 연관도를 MongoDB에 저장한다. use_mongodb 비활성 시 no-op."""
+    if score <= _RELATION_MIN_SCORE:
+        return  # 겹치는 토큰이 없으면 관계로 보지 않는다
+
+    from app import database
+
+    now = datetime.now(timezone.utc)
+    await database.save_relation({
+        "source_news_id": source_id,
+        "target_news_id": target_id,
+        "relation": {
+            # 토큰 중복만으로 판별 가능한 유형은 same_topic 하나뿐이다.
+            # TODO(김성민): cause_effect / same_company / same_industry /
+            #   opposite_view / follow_up 판별은 미구현 (설계 6종 중 5종).
+            "type": "same_topic",
+            "score": score,
+            "reason": reason,
+        },
+        "shared_keywords": shared_keywords,
+        "created_at": now,
+        "updated_at": now,
+    })
+
+
 # ── GET /search ───────────────────────────────────────────────────────────────
 
 @router.get("/search", response_model=SearchResponse)
@@ -326,14 +362,16 @@ async def get_relations(
         src_tokens = _content_tokens(source_art.get("title", ""))
         tgt_tokens = _content_tokens(target_art.get("title", ""))
         shared = list(src_tokens & tgt_tokens)[:5]
+        reason = f"공통 키워드 {len(shared)}개 공유"
         relations.append(
             RelationScore(
                 source_news_id=news_id,
                 target_news_id=tid,
                 relevance_score=score,
-                relation_reason=f"공통 키워드 {len(shared)}개 공유",
+                relation_reason=reason,
                 shared_keywords=shared,
             )
         )
+        await _persist_relation(news_id, tid, score, reason, shared)
 
     return RelationsResponse(relations=relations)
