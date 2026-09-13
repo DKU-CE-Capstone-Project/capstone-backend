@@ -27,7 +27,7 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
 
     같은 뉴스(+연관셋)에 대한 리포트가 이미 있으면 LLM 재호출 없이 재사용합니다(캐싱).
     """
-    center = store.news_cache.get(body.news_id)
+    center = await store.get_news(body.news_id)
     if not center:
         raise HTTPException(
             status_code=404,
@@ -45,11 +45,15 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
             created_at=store.report_cache[existing_id].get("created_at", ""),
         )
 
-    related = [
-        store.news_cache[nid]
-        for nid in body.related_news_ids
-        if nid in store.news_cache
-    ]
+    # 연관 뉴스도 메모리에 없으면 Mongo 폴백 — API 재시작 후에도 근거가 유지되도록.
+    # (한 번만 조회해 evidence_news 에서 재사용한다)
+    related: list[dict] = []
+    related_ids: list[str] = []
+    for nid in body.related_news_ids:
+        art = await store.get_news(nid)
+        if art:
+            related.append(art)
+            related_ids.append(nid)
 
     report_data = await generate_report(center, related)
 
@@ -72,9 +76,8 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
         "evidence_news": [
             {"news_id": body.news_id, "title": center.get("title", "")}
         ] + [
-            {"news_id": nid, "title": store.news_cache[nid].get("title", "")}
-            for nid in body.related_news_ids
-            if nid in store.news_cache
+            {"news_id": nid, "title": art.get("title", "")}
+            for nid, art in zip(related_ids, related)
         ],
         "risk_factors": report_data["risk_factors"],
         "rag_sources": report_data.get("rag_sources", []),
@@ -95,7 +98,7 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
 @router.get("/{report_id}", response_model=ReportResponse)
 async def get_report(report_id: str) -> ReportResponse:
     """생성된 AI 리포트 결과를 조회합니다."""
-    report = store.report_cache.get(report_id)
+    report = await store.get_report(report_id)
     if not report:
         raise HTTPException(status_code=404, detail=f"report_id '{report_id}' not found.")
     return ReportResponse(**report)
