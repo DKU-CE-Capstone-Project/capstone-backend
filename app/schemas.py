@@ -190,3 +190,20 @@ class StrategyResponse(BaseModel):
     strategy_summary: str
     strategy_items: list[StrategyItem]
     created_at: str
+
+
+# ── 세션 (쿠키 기반 사용자 식별) ──────────────────────────────────────────────
+
+
+class MindmapState(BaseModel):
+    """세션에 저장되는 마인드맵 상태. DB에는 저장하지 않는다(설계 결정)."""
+
+    center_news_id: str = ""
+    expanded_news_ids: list[str] = Field(default_factory=list)
+    query: str = ""
+
+
+class SessionResponse(BaseModel):
+    session_id: str
+    mindmap: MindmapState
+    viewed_news_ids: list[str] = Field(default_factory=list)

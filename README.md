@@ -837,6 +837,32 @@ EMBEDDING_MODEL=gemini-embedding-001   # 768차원 — 벡터 인덱스와 반�
 | `jobs` | ⬜ | Redis(`job:{id}`)로 대체 구현 |
 | `users` | ⬜ | 로그인 미구현 |
 
+### 세션 (쿠키 기반 사용자 식별)
+
+로그인을 넣지 않기로 해서 계정으로 사용자를 구분할 수 없습니다. 대신 `econmind_sid`
+쿠키를 발급하고, 세션 상태를 **Redis에 TTL과 함께** 저장합니다. TTL 만료 = 세션 소멸 =
+마인드맵 삭제라, 설계의 "mindmaps는 DB에 저장하지 않는다"가 그대로 지켜집니다.
+
+```env
+SESSION_TTL_SECONDS=86400      # 세션 수명(초). 접근할 때마다 갱신
+SESSION_COOKIE_SECURE=false    # HTTPS 배포 시 true (http에서 true면 쿠키가 안 실림)
+SESSION_COOKIE_SAMESITE=lax    # 프론트/API가 다른 도메인이면 none + SECURE=true
+```
+
+| 엔드포인트 | 설명 |
+|---|---|
+| `GET /api/v1/session` | 세션 id + 마인드맵 상태 조회 (쿠키 없으면 발급) |
+| `DELETE /api/v1/session` | 세션 전체 초기화 |
+| `POST /api/v1/session/mindmap/expand` | 노드 펼치기 — 다음 `graph` 조회에 이웃이 추가됨 |
+| `POST /api/v1/session/mindmap/collapse` | 노드 접기 |
+| `DELETE /api/v1/session/mindmap` | 마인드맵 상태만 초기화 |
+
+`GET /news/{id}/graph`는 세션의 확장 노드를 반영하므로, **같은 뉴스라도 세션마다 다른
+마인드맵**이 나옵니다. `depth=1`이면 확장을 적용하지 않습니다(중심 + 1홉만).
+
+> 프론트엔드는 `fetch(..., { credentials: 'include' })`로 호출해야 쿠키가 오갑니다.
+> Redis가 없으면 프로세스 로컬 dict로 폴백하지만, api를 여러 개로 띄우면 세션이 갈립니다.
+
 > in-memory `store`는 L1 캐시로 유지하고, 미스 시 MongoDB로 폴백합니다
 > (`app/utils.py:resolve_news`). 덕분에 api 프로세스를 재시작하거나 여러 개로 띄워도
 > 리포트·전략 조회가 404로 떨어지지 않습니다.
@@ -966,7 +992,7 @@ pytest tests/ -v
 | v1.2 | RAG 도입 — MongoDB 벡터검색 + critic 검증 에이전트 | ✅ 완료 |
 | v1.3 | Docker 컨테이너화 + NATS/Redis 비동기 분리 | ✅ 완료 |
 | v1.4 | MongoDB 자체 호스팅 전환 + 설계 스키마 정합화 | ✅ 완료 |
-| v1.5 | 쿠키/세션 기반 사용자 식별 (사용자별 마인드맵) | 🔜 예정 |
+| v1.5 | 쿠키/세션 기반 사용자 식별 + 마인드맵 확장 기능 | ✅ 완료 |
 | v1.6 | GDELT Cloud API 교체 검토 (DOC API 2.0 rate limit/RPM 불명확성 대응) | 🔜 예정 |
 | v1.7 | 종목 추출 에이전트 (`related_tickers` / `stock_impact`) | 🔜 예정 |
 | v1.8 | 한국투자증권 MCP 연동 (실시간 시세) | 🔜 예정 |

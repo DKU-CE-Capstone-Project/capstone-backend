@@ -396,3 +396,186 @@ def test_relations_endpoint_skips_unrelated_pair(monkeypatch) -> None:
     )
     assert resp.status_code == 200
     assert saved == []
+
+
+# ── 쿠키 기반 세션 식별 (12주차 회의 결정) ────────────────────────────────────
+
+
+def test_session_cookie_is_issued_and_reused() -> None:
+    """첫 요청에 세션 쿠키가 발급되고, 이후 요청에서는 같은 세션이 유지된다."""
+    from app.session import SESSION_COOKIE
+
+    fresh = TestClient(app)
+    r1 = fresh.get("/api/v1/session")
+    assert r1.status_code == 200
+    assert SESSION_COOKIE in r1.cookies, "세션 쿠키가 발급되지 않았다"
+
+    sid1 = r1.json()["session_id"]
+    assert sid1
+
+    # 같은 클라이언트(=같은 브라우저)는 같은 세션을 유지한다
+    r2 = fresh.get("/api/v1/session")
+    assert r2.json()["session_id"] == sid1
+
+
+def test_session_cookie_is_httponly() -> None:
+    """세션 쿠키는 JS에서 읽을 수 없어야 한다 (XSS로 탈취 방지)."""
+    from app.session import SESSION_COOKIE
+
+    fresh = TestClient(app)
+    resp = fresh.get("/api/v1/session")
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert SESSION_COOKIE in set_cookie
+    assert "HttpOnly" in set_cookie
+
+
+def test_two_sessions_have_independent_mindmaps() -> None:
+    """서로 다른 사용자는 서로 다른 마인드맵을 본다.
+
+    12주차 회의: "김성민 씨랑 문주원 씨랑은 다른 마인드맵이 보여야 되잖아요"
+    로그인이 없으므로 이 구분은 오직 세션 쿠키로만 이뤄진다.
+    """
+    store.news_cache["sess_a"] = {
+        "news_id": "sess_a", "title": "A 기사", "url": "https://example.com/a",
+        "description": "", "_search_keyword": "세션",
+    }
+    store.news_cache["sess_b"] = {
+        "news_id": "sess_b", "title": "B 기사", "url": "https://example.com/b",
+        "description": "", "_search_keyword": "세션",
+    }
+
+    user1 = TestClient(app)
+    user2 = TestClient(app)
+
+    # 서로 다른 세션 id를 받는다
+    sid1 = user1.get("/api/v1/session").json()["session_id"]
+    sid2 = user2.get("/api/v1/session").json()["session_id"]
+    assert sid1 != sid2, "두 클라이언트가 같은 세션을 공유하면 사용자 구분이 안 된다"
+
+    # user1만 노드를 펼친다
+    r = user1.post("/api/v1/session/mindmap/expand", json={"news_id": "sess_b"})
+    assert r.status_code == 200
+    assert r.json()["mindmap"]["expanded_news_ids"] == ["sess_b"]
+
+    # user2의 마인드맵은 영향을 받지 않는다
+    assert user2.get("/api/v1/session").json()["mindmap"]["expanded_news_ids"] == []
+
+
+def test_mindmap_expand_and_collapse_roundtrip() -> None:
+    fresh = TestClient(app)
+    fresh.get("/api/v1/session")
+
+    fresh.post("/api/v1/session/mindmap/expand", json={"news_id": "n1"})
+    body = fresh.post("/api/v1/session/mindmap/expand", json={"news_id": "n2"}).json()
+    assert body["mindmap"]["expanded_news_ids"] == ["n1", "n2"]
+
+    body = fresh.post("/api/v1/session/mindmap/collapse", json={"news_id": "n1"}).json()
+    assert body["mindmap"]["expanded_news_ids"] == ["n2"]
+
+    body = fresh.request("DELETE", "/api/v1/session/mindmap").json()
+    assert body["mindmap"]["expanded_news_ids"] == []
+
+
+def test_graph_records_center_in_session(monkeypatch) -> None:
+    """그래프를 조회하면 세션에 중심 노드가 기록된다."""
+    monkeypatch.setattr(settings, "use_mongodb", False)
+
+    for nid, title in [("g_center", "반도체 공급망"), ("g_rel1", "반도체 수출"), ("g_rel2", "반도체 investment"), ("g_rel3", "반도체 memory")]:
+        store.news_cache[nid] = {
+            "news_id": nid, "title": title, "url": f"https://example.com/{nid}",
+            "description": "", "_search_keyword": "그래프세션",
+        }
+
+    fresh = TestClient(app)
+    resp = fresh.get("/api/v1/news/g_center/graph?limit=5")
+    assert resp.status_code == 200
+
+    state = fresh.get("/api/v1/session").json()
+    assert state["mindmap"]["center_news_id"] == "g_center"
+    assert "g_center" in state["viewed_news_ids"]
+
+
+def test_changing_center_resets_expansion() -> None:
+    """중심 노드가 바뀌면 이전 확장 상태는 초기화된다."""
+    import asyncio
+
+    from app import session as session_store
+
+    sid = "test-sid-reset"
+    asyncio.get_event_loop_policy().new_event_loop()
+
+    async def scenario():
+        await session_store.record_center(sid, "center1")
+        await session_store.expand_node(sid, "x1")
+        state = await session_store.load(sid)
+        assert state["mindmap"]["expanded_news_ids"] == ["x1"]
+
+        await session_store.record_center(sid, "center2")
+        state = await session_store.load(sid)
+        assert state["mindmap"]["center_news_id"] == "center2"
+        assert state["mindmap"]["expanded_news_ids"] == []
+        await session_store.clear(sid)
+
+    asyncio.run(scenario())
+
+
+def test_expanded_node_adds_new_nodes_to_graph(monkeypatch) -> None:
+    """확장한 노드의 이웃이 실제로 그래프에 추가돼야 한다.
+
+    회귀 방지: _related_articles는 '같은 검색어로 수집된 기사'를 캐시 순서대로
+    돌려주기 때문에, 그대로 쓰면 기본 그래프가 이미 가져간 상위 N개와 겹쳐
+    확장이 아무 노드도 추가하지 못한다. 확장 노드 기준으로 재정렬해야 한다.
+    """
+    monkeypatch.setattr(settings, "use_mongodb", False)
+
+    # 같은 검색어 풀에 기사를 충분히 넣어, limit이 작으면 일부가 화면 밖에 남게 한다
+    titles = {
+        "exp_center": "Tariff package shakes markets",
+        "exp_a": "Tariff package detail revealed",
+        "exp_b": "Markets slide on tariff news",
+        "exp_c": "Oil prices climb amid tension",
+        "exp_d": "Semiconductor exports under review",
+        "exp_e": "Won weakens against dollar",
+    }
+    for nid, title in titles.items():
+        store.news_cache[nid] = {
+            "news_id": nid, "title": title, "description": title,
+            "url": f"https://example.com/{nid}", "_search_keyword": "확장테스트",
+        }
+
+    c = TestClient(app)
+    base = c.get("/api/v1/news/exp_center/graph?limit=2").json()
+    base_ids = {n["news_id"] for n in base["nodes"]}
+    assert len(base_ids) == 3, "중심 + 관련 2개"
+
+    # 화면에 이미 있는 노드 하나를 펼친다
+    target = next(nid for nid in base_ids if nid != "exp_center")
+    c.post("/api/v1/session/mindmap/expand", json={"news_id": target})
+
+    after = c.get("/api/v1/news/exp_center/graph?limit=2").json()
+    after_ids = {n["news_id"] for n in after["nodes"]}
+
+    assert len(after_ids) > len(base_ids), "확장했는데 노드가 늘지 않았다"
+    expanded_edges = [e for e in after["edges"] if e["relation_type"] == "expanded"]
+    assert expanded_edges, "expanded 엣지가 없다"
+    assert all(e["source"] == target for e in expanded_edges)
+
+
+def test_depth_one_skips_expansion() -> None:
+    """depth=1이면 중심 + 1홉만 보여주고 확장은 적용하지 않는다."""
+    c = TestClient(app)
+    store.news_cache["d1_center"] = {
+        "news_id": "d1_center", "title": "중심", "description": "",
+        "url": "https://example.com/d1c", "_search_keyword": "깊이",
+    }
+    for i in range(4):
+        store.news_cache[f"d1_{i}"] = {
+            "news_id": f"d1_{i}", "title": f"중심 관련 {i}", "description": "",
+            "url": f"https://example.com/d1-{i}", "_search_keyword": "깊이",
+        }
+
+    c.get("/api/v1/news/d1_center/graph?limit=2")
+    c.post("/api/v1/session/mindmap/expand", json={"news_id": "d1_0"})
+
+    g = c.get("/api/v1/news/d1_center/graph?limit=2&depth=1").json()
+    assert not [e for e in g["edges"] if e["relation_type"] == "expanded"]

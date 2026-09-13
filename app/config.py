@@ -48,6 +48,16 @@ class Settings(BaseSettings):
     mongodb_db_name: str = "capstone_news"
     use_mongodb: bool = False
 
+    # ── 세션 (쿠키 기반 사용자 식별) ──────────────────────────────────────
+    # 로그인을 빼기로 해서 계정으로 사용자를 구분할 수 없다. 대신 쿠키에 세션 id를
+    # 심어 사용자별 마인드맵 상태를 분리한다(12주차 회의 결정).
+    # 상태는 Redis에 TTL과 함께 저장되므로, 만료 = 세션 소멸 = 데이터 삭제다.
+    session_ttl_seconds: int = 86400  # 24시간
+    # HTTPS로 서비스할 때 true. http로 접속하면 true일 때 쿠키가 아예 안 실린다.
+    session_cookie_secure: bool = False
+    # 프론트와 API가 다른 출처면 "none"(+secure=true) 필요. 같은 출처면 "lax"로 충분.
+    session_cookie_samesite: str = "lax"
+
     # ── AI 에이전트 (RAG 그라운딩 + 검증) ────────────────────────────────
     embedding_model: str = "gemini-embedding-001"  # Gemini 임베딩 (768차원 요청, generate와 별도 쿼터)
     use_rag: bool = True       # 리포트 생성 시 벡터검색으로 유사 과거 뉴스 근거 주입

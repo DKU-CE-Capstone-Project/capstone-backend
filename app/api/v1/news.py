@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.agents.diffbot_client import extract_articles_with_diffbot
 from app.agents.filter_agent import _content_tokens, _overlap_coefficient
@@ -23,7 +23,7 @@ from app.schemas import (
     SourceResponse,
     ThumbnailResponse,
 )
-from app import store
+from app import session as session_store, store
 from app.utils import cache_articles, make_news_id, resolve_news, tier_ok
 
 router = APIRouter()
@@ -242,12 +242,18 @@ async def get_source(news_id: str) -> SourceResponse:
 
 @router.get("/{news_id}/graph", response_model=GraphResponse)
 async def get_graph(
+    request: Request,
     news_id: str,
     depth: int = Query(default=2, ge=1, le=3),
     limit: int = Query(default=10, ge=1, le=30),
     include_distance: bool = Query(default=True),
 ) -> GraphResponse:
-    """마인드맵 데이터를 반환합니다."""
+    """마인드맵 데이터를 반환합니다.
+
+    세션(쿠키)에 기록된 확장 노드가 있으면 그 노드의 이웃까지 펼쳐서 돌려줍니다.
+    로그인이 없으므로 사용자 구분은 세션 쿠키로만 이뤄지며, 같은 뉴스라도
+    세션마다 다른 마인드맵이 나옵니다.
+    """
     center = await resolve_news(news_id)
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
@@ -255,7 +261,80 @@ async def get_graph(
     related = await _related_articles(news_id, extra=limit + 2)
     graph = build_graph(center, related[:limit], include_distance=include_distance)
 
+    # 세션에 중심 노드를 기록하고(중심이 바뀌면 확장 상태 초기화), 확장 노드를 반영한다.
+    sid = getattr(request.state, "session_id", "")
+    state = await session_store.record_center(
+        sid, news_id, query=center.get("_search_keyword", "")
+    )
+    expanded = (state.get("mindmap") or {}).get("expanded_news_ids") or []
+    if expanded:
+        await _apply_expansions(graph, expanded, depth=depth, limit=limit)
+
     return GraphResponse(**graph)
+
+
+async def _apply_expansions(
+    graph: dict[str, Any],
+    expanded_ids: list[str],
+    depth: int,
+    limit: int,
+) -> None:
+    """확장된 노드의 이웃을 그래프에 덧붙인다 (마인드맵 확장 기능).
+
+    12주차 회의에서 "확장 기능은 아직 안 들어가 있다"고 확인된 부분이다.
+    확장 결과는 저장하지 않고, 어떤 노드를 펼쳤는지만 세션에 남긴다.
+    depth=1이면 확장하지 않는다(중심 + 1홉만 보기).
+    """
+    if depth < 2:
+        return
+
+    known = {n["news_id"] for n in graph["nodes"]}
+
+    for eid in expanded_ids:
+        if eid not in known:
+            continue  # 현재 그래프에 없는 노드는 무시 (중심이 바뀐 경우 등)
+        parent = await resolve_news(eid)
+        if not parent:
+            continue
+
+        try:
+            # _related_articles는 "같은 검색어로 수집된 기사"를 캐시 순서대로 돌려준다.
+            # 그대로 쓰면 기본 그래프가 이미 가져간 상위 N개와 겹쳐 확장이 아무것도
+            # 추가하지 못한다. 풀을 넓게 뽑은 뒤 '확장한 노드' 기준 연관도로 재정렬해서,
+            # 아직 화면에 없는 기사 중 그 노드와 가장 가까운 것부터 붙인다.
+            neighbors = await _related_articles(eid, extra=limit * 3 + 5)
+        except HTTPException:
+            continue
+
+        neighbors = sorted(
+            neighbors,
+            key=lambda a: _relevance_score(parent, a),
+            reverse=True,
+        )
+
+        added = 0
+        for art in neighbors:
+            nid = art.get("news_id") or make_news_id(art.get("url", ""))
+            if not nid or nid in known:
+                continue
+            summary = art.get("title", "") or art.get("summary") or art.get("description", "")
+            graph["nodes"].append({
+                "news_id": nid,
+                "title": art.get("title", ""),
+                "summary": summary[:200],
+                "distance": 2,
+                "is_center": False,
+            })
+            graph["edges"].append({
+                "source": eid,
+                "target": nid,
+                "relation_type": "expanded",
+                "distance": 2,
+            })
+            known.add(nid)
+            added += 1
+            if added >= max(1, limit // 2):
+                break  # 확장 노드당 상한 — 그래프가 폭발하지 않도록
 
 
 # ── GET /{news_id}/related ────────────────────────────────────────────────────
