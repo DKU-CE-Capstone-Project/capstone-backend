@@ -1,21 +1,5 @@
 # 캡스톤 백엔드 — 실시간 뉴스 기반 멀티 에이전트 투자 판단 지원 시스템
 
-## 공통 뉴스 패키지와 자동배포
-
-GDELT와 Diffbot 구현은 `capstone-news-logic` 저장소에서 관리합니다.
-로컬에서는 두 저장소를 나란히 클론한 뒤 **뉴스 패키지를 먼저 설치**하세요.
-
-```bash
-pip install -e ../capstone-news-logic
-pip install -e '.[dev]'
-DEMO_MODE=true USE_MOCK_NEWS=true USE_MONGODB=false python -m pytest -q
-```
-
-`main` 변경은 CI 통과 후 기존 GCP 서버에 자동 통합 배포됩니다.
-뉴스 저장소의 변경도 API·워커에 반영되며, 정확한 소스 커밋 조합으로 통합 테스트합니다.
-[자동배포 운영 설명서](https://github.com/DKU-CE-Capstone-Project/capstone-deploy/blob/main/gcp/README.md)
-
-
 > **FastAPI + Google Gemini** 기반 뉴스 수집·분석·투자 전략 생성 백엔드 서버
 
 ---

@@ -13,11 +13,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libxml2-dev libxslt1-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Standalone builds use this pinned shared-library revision.
-# The integrated deployment installs its exact news-logic source snapshot instead.
-ARG NEWS_LOGIC_REF=0edb6644782554c5497646a68d579853eb719889
-RUN pip install --no-cache-dir "https://github.com/DKU-CE-Capstone-Project/capstone-news-logic/archive/${NEWS_LOGIC_REF}.tar.gz"
-
 # 패키지 메타 + 소스 복사 후 설치
 COPY pyproject.toml ./
 COPY app ./app
