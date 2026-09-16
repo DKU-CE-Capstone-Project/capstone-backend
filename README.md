@@ -783,23 +783,39 @@ def tier_ok(user_tier: str, required: str) -> bool:
 
 ## 11. 환경 변수
 
-`.env` 파일을 프로젝트 루트(`Capstone/`)에 생성합니다.
+전체 키 목록과 설명은 [`.env.example`](.env.example)에 있습니다. 저장소 루트에 복사해 값을 채웁니다.
 
-```env
-GOOGLE_API_KEY=your_google_ai_key      # Google AI Studio 발급 키
-USE_GDELT=true                         # true면 GDELT DOC API 2.0 사용
-USE_MOCK_NEWS=false                    # true로 설정 시 fixture 사용
-NEWSAPI_KEY=your_newsapi_org_key       # USE_GDELT=false일 때만 사용
-DIFFBOT_API_KEY=your_diffbot_token     # 선택: /news/{id}/source 원문 본문 추출
+```bash
+cp .env.example .env
 ```
 
-| 변수 | 필수 | 없을 때 동작 |
-|------|------|-------------|
-| `USE_GDELT` | — | 기본 `true`, GDELT DOC API 2.0 사용 |
-| `NEWSAPI_KEY` | 선택 | `USE_GDELT=false`인 경우 NewsAPI fallback 호출 실패 |
-| `DIFFBOT_API_KEY` / `DIFFBOT_TOKEN` | 선택 | 원문 본문 추출을 건너뛰고 기존 기사 정보만 반환 |
-| `GOOGLE_API_KEY` | 권장 | Gemini 호출 건너뜀, 설명 기반 fallback 사용 |
-| `USE_MOCK_NEWS` | — | 기본 `false` |
+`app/config.py`(pydantic-settings)가 저장소 루트의 `.env`를 읽습니다. 같은 이름의 셸 환경변수가 있으면
+그쪽이 우선하므로 compose·k8s에서는 `.env` 없이 환경변수만 주입해도 됩니다.
+(옛 모노레포 위치인 상위 디렉터리의 `../.env`도 호환용으로 계속 읽되, 저장소 루트가 우선합니다.)
+
+| 변수 | 기본값 | 없을 때 / 끄면 |
+|------|--------|---------------|
+| `USE_GDELT` | `true` | `false`면 NewsAPI 경로 사용 |
+| `USE_MOCK_NEWS` | `false` | `true`면 외부 API 없이 `fixtures/news_mock.json` 사용 |
+| `NEWSAPI_KEY` | — | `USE_GDELT=false`인 경우 NewsAPI fallback 호출 실패 |
+| `DIFFBOT_TOKEN` / `DIFFBOT_API_KEY` | — | 원문 본문 추출을 건너뛰고 기존 기사 정보만 반환 |
+| `GOOGLE_API_KEY` | — | Gemini 호출 건너뜀, description 기반 fallback (아래 표) |
+| `GEMINI_MODEL` | `gemini-flash-latest` | 무료 쿼터가 모델별로 독립이라 소진 시 교체 |
+| `ANTHROPIC_API_KEY` | — | 있으면 텍스트 생성에 Claude 우선, 실패 시 Gemini |
+| `CLAUDE_MODEL` | `claude-opus-4-8` | |
+| `LLM_PROVIDER` | `auto` | `auto` / `anthropic` / `gemini` |
+| `USE_LLM_SUMMARIES` | `true` | `false`면 카드 요약에 LLM을 쓰지 않음 (쿼터 절약) |
+| `USE_RAG` | `true` | 리포트 생성 시 벡터검색 근거 주입. `USE_MONGODB=true` 필요 |
+| `USE_CRITIC` | `true` | 리포트 critic 검증 |
+| `EMBEDDING_MODEL` | `gemini-embedding-001` | |
+| `USE_MONGODB` | `false` | `false`면 in-memory만 (영속화·RAG 없음) |
+| `MONGODB_URI` | — | `USE_MONGODB=true`일 때 필수 |
+| `MONGODB_DB_NAME` | `capstone_news` | |
+| `NATS_URL` | `nats://localhost:4222` | |
+| `REDIS_URL` | `redis://localhost:6379/0` | |
+| `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | 콤마 구분 |
+| `DEMO_MODE` | `false` | `true`면 mock 뉴스 + 고정 지연 (burst 시연용) |
+| `DEMO_DELAY_SECONDS` | `2.0` | |
 
 Diffbot 토큰은 환경 변수 외에도 `../token.env`, `token.env`, `diffbot/token.txt` 순서로 탐색합니다.
 
@@ -837,16 +853,8 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 # 3. 의존성 설치
 pip install -e .
 
-# 4. 환경 변수 설정 (프로젝트 루트에 .env 파일 생성)
-cat > ../.env << 'EOF'
-GOOGLE_API_KEY=your_google_api_key_here
-USE_GDELT=true
-USE_MOCK_NEWS=false
-# 선택
-DIFFBOT_API_KEY=your_diffbot_token_here
-# USE_GDELT=false일 때만 필요
-NEWSAPI_KEY=your_newsapi_key_here
-EOF
+# 4. 환경 변수 설정 (저장소 루트에 .env 생성 후 GOOGLE_API_KEY 등 값 채우기)
+cp .env.example .env
 
 # 5. 서버 실행
 uvicorn app.main:app --reload --port 8000

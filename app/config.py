@@ -4,8 +4,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # .env 위치: 저장소 루트(.env.example 옆). 뒤의 것이 우선하므로 저장소 루트가
+    # 이긴다. 앞의 경로는 옛 모노레포(Capstone/backend/) 시절 위치 — 기존 로컬 설정 호환용.
     model_config = SettingsConfigDict(
-        env_file=Path(__file__).resolve().parents[2] / ".env",
+        env_file=(
+            Path(__file__).resolve().parents[2] / ".env",
+            Path(__file__).resolve().parents[1] / ".env",
+        ),
         env_file_encoding="utf-8",
         extra="ignore",
     )
