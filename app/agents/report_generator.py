@@ -15,6 +15,8 @@ _PROMPT = """\
 
 기준 뉴스 제목: {title}
 기준 뉴스 요약: {summary}
+기준 뉴스 본문:
+{body}
 연관 뉴스 요약:
 {related_summaries}
 {rag_block}
@@ -105,6 +107,7 @@ async def generate_report(
     prompt = _PROMPT.format(
         title=title,
         summary=summary,
+        body=center.get("cleaned_content", ""),
         related_summaries=related_summaries,
         rag_block=_rag_block(rag_articles),
     )

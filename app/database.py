@@ -10,6 +10,7 @@ graceful no-op/빈값을 반환 → 기존 in-memory 흐름을 절대 깨지 않
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -35,6 +36,26 @@ EMBED_DIM = 768  # gemini-embedding-001, 768차원 요청
 _client = None
 _db = None
 _disabled = False  # 연결 실패 1회 후 재시도 폭주 방지
+
+
+class DatabasePersistenceError(RuntimeError):
+    """Required persistence failed; no credentials/raw driver errors leave the API."""
+
+
+async def ping() -> bool:
+    db = _get_db()
+    if db is None:
+        return False
+    try:
+        await asyncio.wait_for(db.command("ping"), timeout=3)
+        return True
+    except Exception:  # noqa: BLE001 — readiness must report dependency failure
+        return False
+
+
+def _require_available(db) -> None:
+    if settings.mongodb_required and db is None:
+        raise DatabasePersistenceError("MongoDB is unavailable")
 
 
 # ── 설계 스키마 매핑 ────────────────────────────────────────────────────────
@@ -98,9 +119,8 @@ def news_doc_from_article(art: dict[str, Any]) -> dict[str, Any]:
         "source": _split_source(art),
         "published_at": _parse_dt(art.get("published_at")),
         "collected_at": now,
-        # TODO(문주안): 뉴스 API 단계에서 키워드·카테고리 추출 → 지금은 빈 배열
-        "keywords": [],
-        "categories": [],
+        "keywords": list(art.get("keywords") or []),
+        "categories": list(art.get("categories") or []),
         # TODO(김성민): 종목 연관도 수치화 시 related_tickers 채우기
         "related_tickers": [],
         "status": "collected",
@@ -118,6 +138,10 @@ def news_doc_from_article(art: dict[str, Any]) -> dict[str, Any]:
         doc["thumbnail_url"] = art["thumbnail_url"]
     if art.get("_search_keyword"):
         doc["_search_keyword"] = art["_search_keyword"]
+    # Preserve extraction inputs/provenance so Mongo reloads can reuse valid results.
+    for key in ("description", "title_original", "metadata_extraction", "_news_provider", "naver_url", "naver_categories", "content_source_url"):
+        if key in art:
+            doc[key] = art[key]
     return doc
 
 
@@ -143,11 +167,19 @@ def article_from_news_doc(doc: dict[str, Any]) -> dict[str, Any]:
         "url": doc.get("url", ""),
         "source": source.get("name", "") if isinstance(source, dict) else (source or ""),
         "published_at": _iso_z(doc.get("published_at")),
-        "description": doc.get("summary", ""),
+        "description": doc.get("description", doc.get("summary", "")),
         "summary": doc.get("summary", ""),
         "thumbnail_url": doc.get("thumbnail_url", ""),
         "cleaned_content": doc.get("content", ""),
         "_search_keyword": doc.get("_search_keyword", ""),
+        "title_original": doc.get("title_original", doc.get("title", "")),
+        "keywords": list(doc.get("keywords") or []),
+        "categories": list(doc.get("categories") or []),
+        "metadata_extraction": doc.get("metadata_extraction") or {},
+        "_news_provider": doc.get("_news_provider", ""),
+        "naver_url": doc.get("naver_url", ""),
+        "naver_categories": doc.get("naver_categories", []),
+        "content_source_url": doc.get("content_source_url", ""),
     }
 
 
@@ -259,6 +291,7 @@ async def save_news(doc: dict[str, Any]) -> None:
     최초 수집 시각이 덮어써지면 안 된다.
     """
     db = _get_db()
+    _require_available(db)
     if db is None or not doc.get("url"):
         return
     payload = dict(doc)
@@ -270,6 +303,8 @@ async def save_news(doc: dict[str, Any]) -> None:
         await db[NEWS].update_one({"url": payload["url"]}, update, upsert=True)
     except Exception as exc:  # noqa: BLE001
         # validator 거부(code 121)도 여기로 온다 — 어느 필드가 걸렸는지 같이 찍는다
+        if settings.mongodb_required:
+            raise DatabasePersistenceError("News persistence failed") from exc
         detail = getattr(exc, "details", None) or {}
         print(f"[mongo] save_news skip: {type(exc).__name__}: {exc}")
         if detail.get("errInfo"):
@@ -278,6 +313,7 @@ async def save_news(doc: dict[str, Any]) -> None:
 
 async def save_report(doc: dict[str, Any]) -> None:
     db = _get_db()
+    _require_available(db)
     if db is None or not doc.get("report_id"):
         return
     try:
@@ -285,11 +321,14 @@ async def save_report(doc: dict[str, Any]) -> None:
             {"report_id": doc["report_id"]}, {"$set": doc}, upsert=True
         )
     except Exception as exc:  # noqa: BLE001
+        if settings.mongodb_required:
+            raise DatabasePersistenceError("Report persistence failed") from exc
         print(f"[mongo] save_report skip: {type(exc).__name__}: {exc}")
 
 
 async def save_strategy(doc: dict[str, Any]) -> None:
     db = _get_db()
+    _require_available(db)
     if db is None or not doc.get("strategy_id"):
         return
     try:
@@ -297,6 +336,8 @@ async def save_strategy(doc: dict[str, Any]) -> None:
             {"strategy_id": doc["strategy_id"]}, {"$set": doc}, upsert=True
         )
     except Exception as exc:  # noqa: BLE001
+        if settings.mongodb_required:
+            raise DatabasePersistenceError("Strategy persistence failed") from exc
         print(f"[mongo] save_strategy skip: {type(exc).__name__}: {exc}")
 
 

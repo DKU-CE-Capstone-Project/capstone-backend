@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 
-from app.agents.report_generator import generate_report
-from app.agents.critic import verify_report
 from app import database, store
+from app.agents import naver_categories
+from app.agents.critic import verify_report
+from app.agents.diffbot_client import extract_articles_with_diffbot
+from app.agents.report_generator import generate_report
 from app.schemas import ReportCreateRequest, ReportCreateResponse, ReportResponse
 
 router = APIRouter()
@@ -17,7 +19,7 @@ router = APIRouter()
 
 def _report_key(news_id: str, related_ids: list[str]) -> str:
     """같은 뉴스+연관셋이면 동일 key → 리포트 재생성 대신 캐시 재사용."""
-    joined = news_id + "|" + "|".join(sorted(related_ids))
+    joined = "full-body-v1|" + news_id + "|" + "|".join(sorted(related_ids))
     return hashlib.md5(joined.encode()).hexdigest()
 
 
@@ -55,16 +57,31 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
             related.append(art)
             related_ids.append(nid)
 
+    target_url = center.get("naver_url") or center.get("url")
+    if center.get("naver_url"):
+        labels = await naver_categories.fetch_categories(center["naver_url"])
+        if labels is None:
+            raise HTTPException(503, "기사 분류를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.")
+        if not naver_categories.allowed(labels):
+            raise HTTPException(404, "정치·사회 기사는 제공하지 않습니다.")
+    if not center.get("cleaned_content") or center.get("content_source_url") != target_url:
+        extracted = await extract_articles_with_diffbot([center], max_articles=1, concurrency=1, max_retries=0)
+        if not extracted or not extracted[0].get("cleaned_content"):
+            raise HTTPException(502, "기사 본문을 추출하지 못해 리포트를 생성하지 않았습니다. 잠시 후 다시 시도해 주세요.")
+        center = extracted[0]
+        await database.save_news(database.news_doc_from_article(center))
+        store.news_cache[body.news_id] = center
+
     report_data = await generate_report(center, related)
 
     # 검증(critic) 에이전트: 근거 뉴스 대비 리포트 사실성 점검
-    evidence_summaries = [center.get("summary") or center.get("description", "")] + [
+    evidence_summaries = [center.get("cleaned_content", "")] + [
         art.get("summary") or art.get("description", "") for art in related
     ] + (report_data.get("rag_sources") or [])
     verification = await verify_report(report_data, evidence_summaries)
 
     report_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     full_report = {
         "report_id": report_id,
@@ -84,9 +101,9 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
         "verification": verification,
         "created_at": now,
     }
-    store.report_cache[report_id] = full_report
-    store.report_index[cache_key] = report_id  # 결과 캐싱 등록
     await database.save_report(full_report)  # MongoDB write-through (use_mongodb 시)
+    store.report_cache[report_id] = full_report
+    store.report_index[cache_key] = report_id
 
     return ReportCreateResponse(
         report_id=report_id,

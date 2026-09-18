@@ -16,6 +16,8 @@ class Article(BaseModel):
     source: str
     published_at: str
     summary: str
+    keywords: list[str] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
 
 
 class AnalyzeResponse(BaseModel):
@@ -27,6 +29,7 @@ class AnalyzeResponse(BaseModel):
 # ── /api/v1/news ──────────────────────────────────────────────────────────────
 
 class NewsCard(BaseModel):
+    description: str = ""
     news_id: str
     title: str
     summary: str
@@ -34,6 +37,9 @@ class NewsCard(BaseModel):
     source_name: str
     published_at: str
     related_stock_names: list[str] = []
+    source_url: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
 
 
 class SearchResponse(BaseModel):
@@ -53,7 +59,11 @@ class SourceResponse(BaseModel):
     source_url: str
     published_at: str
     original_title: str
+    thumbnail_url: str = ""
     original_body: str = ""
+    description: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
 
 
 # ── /api/v1/news/{id}/graph ───────────────────────────────────────────────────

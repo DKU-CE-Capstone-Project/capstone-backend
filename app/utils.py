@@ -6,6 +6,7 @@ import hashlib
 from typing import Any
 
 from app import store
+from app.agents.article_metadata import enrich_articles
 from app.config import settings
 
 
@@ -21,13 +22,29 @@ async def cache_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]
     in-memory store는 L1 캐시(즉시 응답용). MongoDB 영속화/임베딩은 use_mongodb 시에만.
     반환하는 dict 는 기존 형태 그대로다 — 설계 스키마 변환은 Mongo 저장 직전에만 한다.
     """
-    enriched: list[dict[str, Any]] = []
+    prepared: list[dict[str, Any]] = []
     for art in articles:
         url = art.get("url") or ""
-        nid = make_news_id(url) if url else make_news_id(art.get("title", ""))
-        enriched_art = {**art, "news_id": nid}
-        store.news_cache[nid] = enriched_art
-        enriched.append(enriched_art)
+        nid = art.get("news_id") or make_news_id(url or art.get("title", ""))
+        previous = await store.get_news(nid)
+        merged = dict(art)
+        # A fresh search list must not erase a body/metadata obtained by /source.
+        # Changed titles are treated as a revision: do not reuse the previous body.
+        title = art.get("title_original") or art.get("title")
+        same_body_source = not merged.get("naver_url") or (
+            previous and previous.get("content_source_url") == merged["naver_url"]
+        )
+        if previous and same_body_source and title == (previous.get("title_original") or previous.get("title")):
+            for key in ("cleaned_content", "content_source_url", "keywords", "categories", "metadata_extraction"):
+                if key not in merged and key in previous:
+                    merged[key] = previous[key]
+            if not merged.get("cleaned_content") and previous.get("cleaned_content"):
+                merged["cleaned_content"] = previous["cleaned_content"]
+        prepared.append({**merged, "news_id": nid})
+
+    enriched = await enrich_articles(prepared)
+    for art in enriched:
+        store.news_cache[art["news_id"]] = art
 
     if settings.use_mongodb and enriched:
         await _persist_to_mongo(enriched)
@@ -56,7 +73,9 @@ async def _persist_to_mongo(enriched: list[dict[str, Any]]) -> None:
 
     try:
         await asyncio.gather(*(_one(a) for a in enriched))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
+        if settings.mongodb_required:
+            raise
         print(f"[utils] mongo persist skip: {type(exc).__name__}: {exc}")
 
 
