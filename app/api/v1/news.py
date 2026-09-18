@@ -7,12 +7,10 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.agents.diffbot_client import is_article_image_url
-from app.agents import naver_categories
+from app.agents.diffbot_client import extract_articles_with_diffbot
 from app.agents.filter_agent import _content_tokens, _overlap_coefficient
 from app.agents.graph_builder import _relevance_score, build_graph
-from app.agents.news_fetcher import fetch_naver_news_page, fetch_news
-from app.config import settings
+from app.agents.news_fetcher import fetch_news
 from app.schemas import (
     GraphResponse,
     NewsCard,
@@ -44,7 +42,7 @@ _FALLBACK_IMAGES = [
 def _thumb(art: dict[str, Any], idx: int = 0) -> tuple[str, bool]:
     """Return (thumbnail_url, fallback_used)."""
     url = art.get("thumbnail_url") or ""
-    if is_article_image_url(url):
+    if url:
         return url, False
     return _FALLBACK_IMAGES[idx % len(_FALLBACK_IMAGES)], True
 
@@ -55,16 +53,11 @@ def _to_news_card(art: dict[str, Any], idx: int = 0) -> NewsCard:
     return NewsCard(
         news_id=art.get("news_id") or make_news_id(art.get("url", "")),
         title=title,
-        summary=(art.get("summary") or art.get("description") or title)
-        if art.get("_news_provider") == "naver" else (title or art.get("summary") or art.get("description", "")),
+        summary=title or art.get("summary") or art.get("description", ""),
         thumbnail_url=thumb,
         source_name=art.get("source", ""),
         published_at=art.get("published_at", ""),
         related_stock_names=[],
-        source_url=art.get("naver_url") or art.get("url", ""),
-        description=art.get("description", ""),
-        keywords=art.get("keywords", []),
-        categories=art.get("categories", []),
     )
 
 
@@ -72,16 +65,9 @@ async def _fetch_and_cache(keyword: str) -> list[dict[str, Any]]:
     """Fetch news list results and cache them without dropping source thumbnails."""
     raw_articles = [
         {**article, "_search_keyword": keyword}
-        for article in await fetch_news(keyword, page_size=20)
+        for article in await fetch_news(keyword, page_size=10)
     ]
     return await cache_articles(raw_articles)
-
-
-async def _naver_search_response(keyword: str, page: int, size: int, sort: str) -> SearchResponse:
-    result = await fetch_naver_news_page(keyword, page=page, size=size, sort=sort)
-    articles = await cache_articles([{**a, "_search_keyword": keyword} for a in result.articles])
-    return SearchResponse(news_cards=[_to_news_card(a, i) for i, a in enumerate(articles)],
-                          total_count=result.total)
 
 
 async def _related_articles(news_id: str, extra: int = 8) -> list[dict[str, Any]]:
@@ -122,12 +108,10 @@ async def _related_articles(news_id: str, extra: int = 8) -> list[dict[str, Any]
 async def search_news(
     q: str = Query(min_length=1, max_length=100),
     page: int = Query(default=1, ge=1),
-    size: int = Query(default=20, ge=1, le=50),
+    size: int = Query(default=10, ge=1, le=50),
     sort: str = Query(default="relevance", pattern="^(relevance|latest)$"),
 ) -> SearchResponse:
     """검색어로 뉴스 카드 목록을 조회합니다."""
-    if settings.news_provider == "naver" and not settings.mock_news_active:
-        return await _naver_search_response(q, page, size, sort)
     articles = await _fetch_and_cache(q)
 
     if sort == "latest":
@@ -147,11 +131,9 @@ async def search_news(
 async def news_cards(
     keyword: str = Query(min_length=1, max_length=100),
     page: int = Query(default=1, ge=1),
-    size: int = Query(default=20, ge=1, le=50),
+    size: int = Query(default=10, ge=1, le=50),
 ) -> SearchResponse:
     """키워드 기반 뉴스 카드 목록을 조회합니다."""
-    if settings.news_provider == "naver" and not settings.mock_news_active:
-        return await _naver_search_response(keyword, page, size, "relevance")
     articles = await _fetch_and_cache(keyword)
     total = len(articles)
     start = (page - 1) * size
@@ -181,24 +163,25 @@ async def get_source(news_id: str) -> SourceResponse:
     if not art:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
-    naver_url = art.get("naver_url")
-    if naver_url:
-        labels = await naver_categories.fetch_categories(naver_url)
-        if labels is None:
-            raise HTTPException(status_code=503, detail="기사 분류를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.")
-        if not naver_categories.allowed(labels):
-            raise HTTPException(status_code=404, detail="정치·사회 기사는 제공하지 않습니다.")
+    original_body = art.get("cleaned_content", "")
+    if not original_body and art.get("url"):
+        extracted = await extract_articles_with_diffbot([art], max_articles=1, concurrency=1)
+        if extracted:
+            next_art = {**art, **extracted[0]}
+            original_body = next_art.get("cleaned_content", "")
+            if original_body:
+                next_art["description"] = original_body
+                store.news_cache[news_id] = next_art
+                await cache_articles([next_art])
+                art = next_art
+
     return SourceResponse(
         news_id=news_id,
         source_name=art.get("source", ""),
-        source_url=naver_url or art.get("url", ""),
+        source_url=art.get("url", ""),
         published_at=art.get("published_at", ""),
         original_title=art.get("title", ""),
-        original_body="",
-        thumbnail_url=art.get("thumbnail_url", ""),
-        description=art.get("description") or art.get("summary", ""),
-        keywords=art.get("keywords", []),
-        categories=art.get("categories", []),
+        original_body=original_body,
     )
 
 
