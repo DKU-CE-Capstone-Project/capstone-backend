@@ -6,8 +6,11 @@ from typing import Any
 
 import httpx
 
-from app.config import settings
+from app.agents import naver_categories
+from app.agents.diffbot_client import is_article_image_url
 from app.agents.gdelt_client import fetch_gdelt_articles
+from app.agents.naver_client import NaverNewsPage, fetch_naver_page
+from app.config import settings
 
 NEWSAPI_URL = "https://newsapi.org/v2/everything"
 FIXTURE_PATH = Path(__file__).resolve().parents[2] / "fixtures" / "news_mock.json"
@@ -177,28 +180,52 @@ async def _fetch_newsapi(keyword: str, page_size: int) -> list[dict[str, Any]]:
         if len(relevant) >= 2:
             articles = relevant
         return [_normalize(a) for a in articles]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — preserve the optional legacy provider fallback
         print(f"[newsapi] fallback also failed: {exc}")
         return []
 
 
-async def fetch_news(keyword: str, page_size: int = 12) -> list[dict[str, Any]]:
+async def fetch_naver_news_page(keyword: str, *, page: int = 1, size: int = 20,
+                                sort: str = "relevance") -> NaverNewsPage:
+    """Search descriptions and page metadata only. Diffbot is deferred to report creation."""
+    result = await fetch_naver_page(keyword, page=page, size=size, sort=sort)
+    semaphore = asyncio.Semaphore(3)
+
+    async def inspect(article):
+        async with semaphore:
+            labels = await naver_categories.fetch_categories(article["naver_url"])
+            if not naver_categories.allowed(labels):
+                return None
+            image = naver_categories.page_image(article["naver_url"])
+            return {**article, "naver_categories": labels,
+                    "thumbnail_url": image if is_article_image_url(image) else ""}
+
+    checked = await asyncio.gather(*(inspect(article) for article in result.articles))
+    result.articles = [article for article in checked if article is not None]
+    return result
+
+
+async def fetch_news(keyword: str, page_size: int = 20) -> list[dict[str, Any]]:
     """기사 목록을 가져옵니다.
 
-    전략:
-    1. GDELT DOC API → 뉴스 목록 수집 + 중복 제거 (기본)
-    2. GDELT가 비거나(429/결과없음) USE_GDELT=false → NewsAPI 폴백
-    3. 모든 외부 소스 실패 또는 USE_MOCK_NEWS=true → mock fixture (회복력 안전망)
+    기본은 NAVER 뉴스 검색 설명 + 페이지 대표 이미지. 본문은 리포트 생성 요청 시 추출한다.
+    NAVER 오류는 호출자에게 전달한다. mock fixture는 명시적인 mock/demo에서 사용한다.
+    기존 GDELT 경로의 NewsAPI/mock 폴백은 호환용으로 유지한다.
 
     반환 형식: [{title, url, source, published_at, description, thumbnail_url}]
     """
     if settings.mock_news_active:
         return [_normalize(a) for a in _load_mock()]
 
+    if settings.news_provider == "naver":
+        return (await fetch_naver_news_page(keyword, size=min(100, max(1, page_size)))).articles
+    if settings.news_provider == "newsapi":
+        return await _fetch_newsapi(keyword, page_size)
+
     # ── 1) GDELT 목록 수집 ─────────────────────────────────────────────────
     search_term, _ = _translate_keyword(keyword)
 
-    if settings.use_gdelt:
+    if settings.news_provider == "gdelt":
         gdelt_articles = await fetch_gdelt_articles(
             keyword=search_term,
             source_lang="korean",
