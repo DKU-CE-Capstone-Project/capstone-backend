@@ -147,7 +147,7 @@ async def test_diffbot_extraction_adds_cleaned_content(monkeypatch) -> None:
     assert extracted[0]["cleaned_content_length"] == len("First paragraph.\nSecond paragraph.")
 
 
-def test_source_endpoint_extracts_clicked_article_with_diffbot(monkeypatch) -> None:
+def test_source_endpoint_returns_description_without_diffbot(monkeypatch) -> None:
     news_id = "clicked-news"
     store.news_cache[news_id] = {
         "news_id": news_id,
@@ -162,14 +162,15 @@ def test_source_endpoint_extracts_clicked_article_with_diffbot(monkeypatch) -> N
         return [{**articles[0], "cleaned_content": "Diffbot body for clicked article."}]
 
     monkeypatch.setattr(settings, "use_mongodb", False)
-    monkeypatch.setattr(news_routes, "extract_articles_with_diffbot", fake_extract_articles_with_diffbot)
+    monkeypatch.setattr(diffbot_client, "extract_articles_with_diffbot", fake_extract_articles_with_diffbot)
 
     resp = client.get(f"/api/v1/news/{news_id}/source")
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["original_body"] == "Diffbot body for clicked article."
-    assert store.news_cache[news_id]["description"] == "Diffbot body for clicked article."
+    assert body["original_body"] == ""
+    assert body["description"] == "Clicked title"
+    assert store.news_cache[news_id]["description"] == "Clicked title"
 
 
 def test_analyze_with_mocked_news(monkeypatch) -> None:

@@ -1,15 +1,40 @@
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from app.agents.naver_client import NaverNewsError
 from app.api.routes import router as legacy_router
 from app.api.v1 import jobs, keywords, news, reports, strategies
 from app.config import settings
+from app.database import DatabasePersistenceError
 
 app = FastAPI(
     title="Capstone — News Multi-Agent API",
     version="1.0.0",
     description="실시간 뉴스 기반 멀티 에이전트 투자 판단 지원 시스템",
 )
+
+
+@app.exception_handler(NaverNewsError)
+async def naver_error_handler(request, exc: NaverNewsError):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(DatabasePersistenceError)
+async def persistence_error_handler(request, exc: DatabasePersistenceError):
+    return JSONResponse(status_code=503, content={"detail": "데이터를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요."})
+
+
+@app.get("/ready", tags=["system"])
+async def readiness():
+    from app import database
+
+    if not settings.use_mongodb:
+        return JSONResponse(status_code=503 if settings.mongodb_required else 200,
+                            content={"status": "error" if settings.mongodb_required else "ok", "mongodb": "off"})
+    connected = await database.ping()
+    return JSONResponse(status_code=200 if connected else 503,
+                        content={"status": "ok" if connected else "error", "mongodb": "on" if connected else "unavailable"})
 
 app.add_middleware(
     CORSMiddleware,
