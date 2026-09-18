@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 from app.config import settings
 
 
@@ -18,15 +16,7 @@ def _client():
 
 
 async def generate(prompt: str) -> str:
-    try:
-        return await asyncio.wait_for(_generate_with_provider(prompt), settings.gemini_timeout_seconds)
-    except TimeoutError:
-        print("[llm] generation timeout")
-        return ""
-
-
-async def _generate_with_provider(prompt: str) -> str:
-    """텍스트 생성. 기본 Gemini; auto 설정일 때만 Claude → Gemini fallback.
+    """텍스트 생성. anthropic_api_key가 있으면 Claude 우선, 실패 시 Gemini로 fallback.
 
     임베딩(embed)은 항상 Gemini — Claude에는 임베딩 API가 없음.
     """
@@ -87,32 +77,17 @@ async def _generate_gemini(prompt: str) -> str:
             contents=prompt,
             config=gtypes.GenerateContentConfig(
                 temperature=0.3,
-                max_output_tokens=settings.llm_max_output_tokens,
-                service_tier=settings.gemini_service_tier,
-                http_options=gtypes.HttpOptions(
-                    timeout=int(settings.gemini_timeout_seconds * 1000),
-                    retry_options=gtypes.HttpRetryOptions(
-                        attempts=3, initial_delay=1, max_delay=8, exp_base=2,
-                        http_status_codes=[429, 503],
-                    ),
-                ),
+                max_output_tokens=512,
             ),
         )
         return (resp.text or "").strip()
-    except Exception as e:  # noqa: BLE001 — optional provider errors use a safe fallback
+    except Exception as e:
         # 할당량 초과·네트워크 오류 등은 조용히 fallback 처리
-        print(f"[llm] Gemini error (fallback): {type(e).__name__}")
+        print(f"[llm] Gemini error (fallback): {type(e).__name__}: {e}")
         return ""
 
 
 async def embed(text: str) -> list[float]:
-    try:
-        return await asyncio.wait_for(_embed(text), settings.embedding_timeout_seconds)
-    except TimeoutError:
-        return []
-
-
-async def _embed(text: str) -> list[float]:
     """Gemini 임베딩 벡터(768차원) 반환. 키 없음/오류 시 빈 리스트(graceful).
 
     임베딩 쿼터는 generate_content와 별도 버킷이라 비교적 여유롭다.
