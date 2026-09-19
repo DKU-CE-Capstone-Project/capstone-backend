@@ -48,7 +48,7 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 | `GEMINI_MODEL`, `GEMINI_SERVICE_TIER` | `gemini-3.5-flash-lite`, `flex` |
 | `USE_MOCK_NEWS`, `DEMO_MODE` | 실제 연동은 모두 `false` |
 | `USE_LLM_METADATA`, `USE_LLM_SUMMARIES` | 각각 `true`, `false` 권장. 카드 설명은 NAVER 원문 description |
-| `USE_MONGODB`, `MONGODB_URI`, `MONGODB_DB_NAME` | 영속화 활성화, 해당 환경의 앱 계정 URI, `capstone_news` |
+| `USE_MONGODB`, `MONGODB_URI`, `MONGODB_DB_NAME` | 기본 `true`; 연결할 환경의 앱 계정 URI가 필요하며 DB 이름 기본값은 `capstone_news` |
 | `MONGODB_REQUIRED` | 로컬 기본 `false`, 서버 `true`. 필수 저장 실패는 503 |
 | `USE_RAG`, `USE_CRITIC` | 유사 기사 근거 검색, 생성 리포트 검증 |
 | `CORS_ORIGINS` | 로컬은 `http://localhost:5173,http://127.0.0.1:5173` |

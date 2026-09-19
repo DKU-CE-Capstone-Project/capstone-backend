@@ -68,10 +68,10 @@ class Settings(BaseSettings):
     demo_delay_seconds: float = 2.0
 
     # ── MongoDB Atlas (영속화 + 벡터검색) ────────────────────────────────
-    # 연결 불가/미설정 시 use_mongodb=False로 두면 전 기능 graceful no-op (기존 흐름 유지).
+    # 기본적으로 MongoDB를 사용한다. 로컬에서 DB 없이 실행할 때만 USE_MONGODB=false로 지정한다.
     mongodb_uri: str = ""
     mongodb_db_name: str = "capstone_news"
-    use_mongodb: bool = False
+    use_mongodb: bool = True
     mongodb_required: bool = False  # 서버에서는 저장 실패를 성공으로 처리하지 않는다.
 
     # ── AI 에이전트 (RAG 그라운딩 + 검증) ────────────────────────────────
