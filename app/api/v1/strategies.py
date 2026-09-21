@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 
-from app.agents.strategy_generator import generate_strategy
 from app import database, store
+from app.agents.strategy_generator import generate_strategy
 from app.schemas import StrategyCreateRequest, StrategyCreateResponse, StrategyResponse
 
 router = APIRouter()
@@ -30,7 +30,7 @@ async def create_strategy(body: StrategyCreateRequest) -> StrategyCreateResponse
     )
 
     strategy_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     full_strategy = {
         "strategy_id": strategy_id,
@@ -41,8 +41,8 @@ async def create_strategy(body: StrategyCreateRequest) -> StrategyCreateResponse
         "strategy_items": strategy_data["strategy_items"],
         "created_at": now,
     }
-    store.strategy_cache[strategy_id] = full_strategy
     await database.save_strategy(full_strategy)  # MongoDB write-through (use_mongodb 시)
+    store.strategy_cache[strategy_id] = full_strategy
 
     return StrategyCreateResponse(
         strategy_id=strategy_id,

@@ -3,6 +3,7 @@ from app.agents.keyword_expander import expand_keywords
 from app.agents.news_fetcher import fetch_news
 from app.agents.summarizer import summarize_articles
 from app.schemas import AnalyzeResponse, Article
+from app.utils import cache_articles
 
 
 # Deterministic pipeline orchestrator. Will graduate to a Google ADK SequentialAgent
@@ -12,6 +13,7 @@ async def run_analysis(keyword: str) -> AnalyzeResponse:
     raw = await fetch_news(keyword)
     deduped = dedupe_articles(raw)
     summarized = await summarize_articles(deduped[:6])
+    summarized = await cache_articles(summarized)
     related = await expand_keywords(keyword, summarized)
 
     articles = [
@@ -21,6 +23,8 @@ async def run_analysis(keyword: str) -> AnalyzeResponse:
             source=a.get("source", ""),
             published_at=a.get("published_at", ""),
             summary=a.get("summary", ""),
+            keywords=a.get("keywords", []),
+            categories=a.get("categories", []),
         )
         for a in summarized
     ]
