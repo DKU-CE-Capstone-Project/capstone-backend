@@ -75,8 +75,38 @@ NCP 요청은 `https://naverapihub.apigw.ntruss.com/search/v1/news`에 `X-NCP-AP
 | `POST /api/v1/strategies`, `GET /api/v1/strategies/{id}` | 전략 생성 및 조회 |
 | `POST /jobs`, `GET /jobs/{id}` | 기존 NATS·Redis 작업 큐 |
 | `POST /analyze` | 기존 분석 호환 경로 |
+| `GET`·`DELETE /api/v1/session`, `POST /api/v1/session/mindmap/expand`·`collapse`, `DELETE /api/v1/session/mindmap` | 쿠키 기반 세션 식별·마인드맵 상태. 아래 「세션」 참고 |
 
 전체 요청·응답 형식은 [뉴스 세션 API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)와 해당 브랜치 실행 중인 `/docs`를 참고한다. `/health`는 실제 DB ping이 아니며 `/ready`가 이를 검사한다. `/graph`·`/related`는 구현돼 있지만 현재 프론트 뉴스맵 화면은 호출하지 않는다. 마인드맵 알고리즘 적용은 [보류 결정](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/04-roadmap.md#마인드맵-알고리즘-보류-결정-2026-09-19)에 따른다. NCP 인증·응답 오류는 안전한 메시지로 전달하며, 검색 오류를 mock 뉴스로 대체하지 않는다.
+
+## 세션 (쿠키 기반 사용자 식별)
+
+로그인을 넣지 않기로 해서 계정으로 사용자를 구분할 수 없다. 대신 `econmind_sid` 쿠키를
+발급하고 세션 상태를 **Redis에 TTL과 함께** 저장한다. TTL 만료 = 세션 소멸 = 데이터 삭제다.
+Redis가 없거나 죽어 있으면 프로세스 로컬 dict로 폴백하지만, api를 여러 개로 띄우면
+세션이 인스턴스마다 갈리므로 운영에서는 Redis를 전제로 한다.
+
+```bash
+SESSION_TTL_SECONDS=86400      # 세션 수명(초). 접근할 때마다 갱신
+SESSION_COOKIE_SECURE=false    # HTTPS로 서비스할 때 true
+SESSION_COOKIE_SAMESITE=lax    # 프론트와 API가 다른 출처면 none(+secure=true)
+```
+
+| 메서드 / 경로 | 역할 |
+|---|---|
+| `GET /api/v1/session` | 세션 id + 마인드맵 상태 조회 (쿠키 없으면 발급) |
+| `DELETE /api/v1/session` | 세션 전체 초기화 |
+| `POST /api/v1/session/mindmap/expand` | 펼친 노드를 세션에 기록 |
+| `POST /api/v1/session/mindmap/collapse` | 펼친 노드 기록 해제 |
+| `DELETE /api/v1/session/mindmap` | 마인드맵 상태만 초기화 |
+
+쿠키는 `HttpOnly`로 발급하며 CORS는 `allow_credentials=True`다. 프론트엔드는
+`fetch(..., { credentials: 'include' })`로 호출해야 쿠키가 오간다.
+
+> **현재 범위**: 세션은 어떤 노드를 펼쳤는지 *기록*만 한다. `GET /news/{id}/graph`는
+> 아직 세션의 확장 상태를 읽지 않는다 — 그 연동은 `app/api/v1/news.py`의 마인드맵 확장
+> 포팅에 딸려 있고, 해당 포팅은 [2026-09-19 보류 결정](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/04-roadmap.md#마인드맵-알고리즘-보류-결정-2026-09-19)
+> 대상이다. 화면 연동도 아직 없다.
 
 ## 검증과 배포
 
