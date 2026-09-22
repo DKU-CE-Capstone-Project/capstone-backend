@@ -17,7 +17,7 @@ import uuid
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.job_store import get_job, set_job
+from app.job_store import PUBLIC_JOB_ERROR, get_job, set_job
 from app.messaging.nats_client import publish_job
 
 router = APIRouter()
@@ -47,4 +47,6 @@ async def read_job(job_id: str) -> dict:
     job = await get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"job '{job_id}' not found")
+    if job.get("status") == "error":
+        return {**job, "error": PUBLIC_JOB_ERROR}
     return job

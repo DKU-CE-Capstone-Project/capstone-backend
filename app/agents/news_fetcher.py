@@ -181,7 +181,7 @@ async def _fetch_newsapi(keyword: str, page_size: int) -> list[dict[str, Any]]:
             articles = relevant
         return [_normalize(a) for a in articles]
     except Exception as exc:  # noqa: BLE001 — preserve the optional legacy provider fallback
-        print(f"[newsapi] fallback also failed: {exc}")
+        print(f"[newsapi] fallback also failed: {type(exc).__name__}")
         return []
 
 

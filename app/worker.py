@@ -16,7 +16,7 @@ import json
 
 from app.agents.orchestrator import run_analysis
 from app.config import settings
-from app.job_store import set_job
+from app.job_store import PUBLIC_JOB_ERROR, set_job
 from app.messaging.nats_client import DURABLE, SUBJECT, connect, ensure_stream
 
 
@@ -35,10 +35,10 @@ async def _process(job: dict) -> None:
             "keyword": keyword,
             "result": json.loads(result.model_dump_json()),
         })
-        print(f"[worker] done job={job_id} keyword={keyword}")
+        print(f"[worker] done job={job_id}")
     except Exception as exc:  # noqa: BLE001
-        await set_job(job_id, {"status": "error", "keyword": keyword, "error": str(exc)})
-        print(f"[worker] error job={job_id}: {exc}")
+        await set_job(job_id, {"status": "error", "keyword": keyword, "error": PUBLIC_JOB_ERROR})
+        print(f"[worker] analysis failed job={job_id} type={type(exc).__name__}")
 
 
 async def main() -> None:
@@ -60,7 +60,7 @@ async def main() -> None:
                 await _process(job)
                 await msg.ack()
             except Exception as exc:  # noqa: BLE001
-                print(f"[worker] message handling error: {exc}")
+                print(f"[worker] message handling error type={type(exc).__name__}")
                 try:
                     await msg.nak()
                 except Exception:

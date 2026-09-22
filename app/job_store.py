@@ -16,6 +16,7 @@ import redis.asyncio as aioredis
 from app.config import settings
 
 _client: aioredis.Redis | None = None
+PUBLIC_JOB_ERROR = "분석 작업을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요."
 
 
 def _redis() -> aioredis.Redis:
