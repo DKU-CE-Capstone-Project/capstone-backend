@@ -68,11 +68,12 @@ class SourceResponse(BaseModel):
 
 # ── /api/v1/news/{id}/graph ───────────────────────────────────────────────────
 
-class GraphNode(BaseModel):
-    news_id: str
-    title: str
-    summary: str
+class NewsMapCard(NewsCard):
     distance: int
+    relevance_score: float | None = None  # PAID only; the center has no pair score.
+
+
+class GraphNode(NewsMapCard):
     is_center: bool = False
 
 
@@ -91,13 +92,12 @@ class GraphResponse(BaseModel):
 
 # ── /api/v1/news/{id}/related ─────────────────────────────────────────────────
 
-class RelatedNewsItem(BaseModel):
-    news_id: str
-    title: str
-    summary: str
-    thumbnail_url: str
-    relevance_score: float | None = None  # PAID 전용
-    distance: int
+class RelatedNewsItem(NewsMapCard):
+    pass
+
+
+class RelatedResponse(BaseModel):
+    related_news: list[RelatedNewsItem]
 
 
 # ── /api/v1/news/selections ───────────────────────────────────────────────────

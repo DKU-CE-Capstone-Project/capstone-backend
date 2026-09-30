@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -10,64 +10,30 @@ from fastapi import APIRouter, HTTPException, Query
 from app import database, store
 from app.agents import naver_categories
 from app.agents.article_embeddings import EmbeddingUnavailable
-from app.agents.diffbot_client import is_article_image_url
 from app.agents.filter_agent import _content_tokens
 from app.agents.graph_builder import _relevance_score, build_graph
 from app.agents.news_fetcher import fetch_naver_news_page, fetch_news
 from app.agents.related_selector import article_id, select_related
 from app.config import settings
+from app.news_cards import thumbnail as _thumb
+from app.news_cards import to_news_card as _to_news_card
 from app.schemas import (
     GraphResponse,
-    NewsCard,
     NewsSelectionRequest,
     NewsSelectionResponse,
     RelatedNewsItem,
+    RelatedResponse,
     RelationScore,
     RelationsResponse,
     SearchResponse,
     SourceResponse,
     ThumbnailResponse,
 )
-from app.utils import cache_articles, make_news_id, tier_ok
+from app.utils import cache_articles, tier_ok
 
 router = APIRouter()
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-
-_FALLBACK_IMAGES = [
-    "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1516937941344-00b4e0337589?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1509391366360-2e959784a276?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1526304640581-d334cdbbf45e?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1473341304170-971dccb5ac1e?auto=format&fit=crop&w=520&q=80",
-]
-
-
-def _thumb(art: dict[str, Any], idx: int = 0) -> tuple[str, bool]:
-    """Return (thumbnail_url, fallback_used)."""
-    url = art.get("thumbnail_url") or ""
-    if is_article_image_url(url):
-        return url, False
-    return _FALLBACK_IMAGES[idx % len(_FALLBACK_IMAGES)], True
-
-
-def _to_news_card(art: dict[str, Any], idx: int = 0) -> NewsCard:
-    thumb, _ = _thumb(art, idx)
-    title = art.get("title", "")
-    return NewsCard(
-        news_id=art.get("news_id") or make_news_id(art.get("url", "")),
-        title=title,
-        summary=art.get("description") or art.get("summary") or "",
-        thumbnail_url=thumb,
-        source_name=art.get("source", ""),
-        published_at=art.get("published_at", ""),
-        related_stock_names=[],
-        source_url=art.get("naver_url") or art.get("url", ""),
-        description=art.get("description", ""),
-        keywords=art.get("keywords", []),
-        categories=art.get("categories", []),
-    )
-
 
 async def _fetch_and_cache(keyword: str) -> list[dict[str, Any]]:
     """Fetch news list results and cache them without dropping source thumbnails."""
@@ -123,7 +89,10 @@ async def _related_articles(news_id: str) -> list[dict[str, Any]]:
     return [same_search[nid] for nid in sorted(same_search)[:cap]]
 
 
-async def _selected_related(center: dict[str, Any], limit: int, min_relevance: float = 0.0):
+async def _selected_related(
+    center: dict[str, Any], limit: int, min_relevance: float = 0.0, tier: str = "FREE",
+):
+    limit = limit if tier_ok(tier, "PAID") else min(limit, 3)
     candidates = await _related_articles(article_id(center))
     try:
         return await select_related(center, candidates, limit=limit, min_relevance=min_relevance)
@@ -226,30 +195,36 @@ async def get_source(news_id: str) -> SourceResponse:
 async def get_graph(
     news_id: str,
     depth: int = Query(default=2, ge=1, le=3),
-    limit: int = Query(default=10, ge=1, le=30),
+    limit: int = Query(default=10, ge=1, le=50),
     include_distance: bool = Query(default=True),
+    min_relevance: float = Query(default=0.0, ge=0.0, le=1.0),
+    include_score: bool = Query(default=False),
+    tier: str = Query(default="FREE", pattern="^(FREE|BASIC|PAID)$"),
 ) -> GraphResponse:
     """마인드맵 데이터를 반환합니다."""
     center = await store.get_news(news_id)
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
-    related = await _selected_related(center, limit)
-    graph = build_graph(center, [item.article for item in related], include_distance=include_distance)
+    related = await _selected_related(center, limit, min_relevance, tier)
+    scores = {article_id(item.article): round(item.score, 6) for item in related} if tier_ok(tier, "PAID") else {}
+    graph = build_graph(
+        center, [item.article for item in related], include_distance=include_distance, scores=scores,
+    )
 
     return GraphResponse(**graph)
 
 
 # ── GET /{news_id}/related ────────────────────────────────────────────────────
 
-@router.get("/{news_id}/related")
+@router.get("/{news_id}/related", response_model=RelatedResponse)
 async def get_related(
     news_id: str,
     limit: int = Query(default=10, ge=1, le=50),
     min_relevance: float = Query(default=0.0, ge=0.0, le=1.0),
     include_score: bool = Query(default=False),
     tier: str = Query(default="FREE", pattern="^(FREE|BASIC|PAID)$"),
-) -> dict[str, Any]:
+) -> RelatedResponse:
     """
     연관 뉴스를 반환합니다.
     FREE: 최대 3개, relevance_score 미포함.
@@ -261,26 +236,20 @@ async def get_related(
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
     is_paid = tier_ok(tier, "PAID")
-    effective_limit = limit if is_paid else min(limit, 3)
-
-    related = await _selected_related(center, effective_limit, min_relevance)
+    related = await _selected_related(center, limit, min_relevance, tier)
 
     items: list[RelatedNewsItem] = []
     for i, ranked in enumerate(related):
         art, score = ranked.article, ranked.score
-        thumb, _ = _thumb(art, i)
         items.append(
             RelatedNewsItem(
-                news_id=art.get("news_id") or make_news_id(art.get("url", "")),
-                title=art.get("title", ""),
-                summary=art.get("description") or art.get("summary") or "",
-                thumbnail_url=thumb,
+                **_to_news_card(art, i).model_dump(),
                 relevance_score=round(score, 6) if is_paid else None,
                 distance=1,
             )
         )
 
-    return {"related_news": [item.model_dump() for item in items]}
+    return RelatedResponse(related_news=items)
 
 
 # ── POST /selections (PAID) ───────────────────────────────────────────────────
@@ -301,7 +270,7 @@ async def create_selection(
             selected.append({"news_id": nid, "title": art.get("title", "")})
 
     sid = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     store.selection_cache[sid] = {
         "selection_id": sid,
         "news_ids": body.news_ids,

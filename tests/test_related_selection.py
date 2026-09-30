@@ -147,7 +147,7 @@ def test_free_paid_limits_and_score_visibility(monkeypatch):
         assert len(response.json()["related_news"]) == 3
         assert all(a["relevance_score"] is None for a in response.json()["related_news"])
     paid = client.get("/api/v1/news/0/related?limit=5&tier=PAID").json()["related_news"]
-    graph = client.get("/api/v1/news/0/graph?limit=5").json()["nodes"][1:]
+    graph = client.get("/api/v1/news/0/graph?limit=5&tier=PAID").json()["nodes"][1:]
     assert len(paid) == 5 and all(a["relevance_score"] >= 0.65 for a in paid)
     assert [a["news_id"] for a in paid] == [a["news_id"] for a in graph]
 

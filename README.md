@@ -35,7 +35,9 @@
 3. 기사별 `Title: {title}\nDescription: {description}` 형식으로 Gemini 임베딩을 생성하거나 저장 벡터를 재사용한다. HTML·공백을 정리하고 제목 500자·설명 6,000자까지 사용한다. 설명이 없으면 제목만 사용하며 본문·생성 summary를 보충하지 않는다. 뉴스맵에서는 Diffbot을 새로 호출하지 않는다.
 4. 서버에서 코사인을 계산하고, 근거 있는 키워드의 보조 점수와 등록된 조직명만 겹치는 경우의 감점을 적용한다. 최소 연관도 필터 → 점수 내림차순·동점 뉴스 ID 오름차순 → 최종 개수 제한 순으로 처리한다. 통과 기사가 부족해도 다른 기사로 채우지 않는다.
 
-`/related`와 `/graph`는 [공통 선정 함수](app/agents/related_selector.py)를 사용한다. FREE/BASIC도 내부 평가·필터·정렬을 수행하며 마지막에 `min(limit, 3)`건만 반환하고 `relevance_score`는 숨긴다. PAID는 요청 limit에 따라 반환하고 점수를 노출한다. `tier`는 쿼리 값이며 실제 구독 확인 기능은 아직 없다. `/graph`는 기존대로 tier 입력이 없고 요청 limit을 적용한다. 모든 주변 노드는 직접 연결이므로 `distance=1`이다. `/relations`의 기존 단어 중첩 점수는 별도 의미다.
+`/related`와 `/graph`는 [공통 선정 함수](app/agents/related_selector.py)와 같은 요금제 정책을 사용한다. 두 API 모두 `tier=FREE`, `limit=10`(1~50), `min_relevance=0`을 기본값으로 받는다. FREE/BASIC도 내부 평가·필터·정렬을 수행하며 마지막에 `min(limit, 3)`건만 반환하고 `relevance_score=null`로 숨긴다. PAID는 요청 limit에 따라 반환하고 점수를 노출한다. `include_score`는 호환용이며 FREE/BASIC의 점수 숨김을 해제하지 않는다. `tier`는 쿼리 값이며 실제 구독 확인 기능은 아직 없다. **기존 `/graph` 호출도 tier를 생략하면 이제 주변 최대 3건**이다. 모든 주변 노드는 직접 연결이므로 `distance=1`이다. `/relations`의 기존 단어 중첩 점수는 별도 의미다.
+
+검색·연관 기사·그래프 노드는 [공통 카드 변환](app/news_cards.py)을 사용해 `description`, `source_name`, `source_url`, `published_at`, `thumbnail_url`, `keywords`, `categories`를 함께 반환한다. `/related`는 주변 기사 목록, `/graph`는 중심 기사와 전체 노드·연결선을 반환하며 중심의 `distance=0`, `relevance_score=null`이다. `limit`은 중심을 제외한 주변 개수다. 설명은 자르지 않고, `summary`는 description 우선·기존 summary 대체 규칙을 유지한다. `/related`의 응답도 `RelatedResponse`로 OpenAPI에 명시한다.
 
 최종 점수는 `clip((1-w) * max(cosine, 0) + w * J - p, 0, 1)`이다. `J`는 조직명을 제외한 키워드 집합의 Jaccard 값이며, `p`는 등록된 조직명이 겹치면서 다른 핵심어는 겹치지 않을 때만 적용한다. `AI`, `HBM`, `HBM3E`, `금리`와 확인된 별칭을 보존하고, 같은 제목·설명에서 추출된 메타데이터는 집합으로 합쳐 반복 가산하지 않는다. 현재 가중치·임계값은 **실제 뉴스 품질 평가 전 초기값**이다.
 
@@ -145,7 +147,7 @@ docker build --platform linux/amd64 -t econmind-backend:release-20260918 .
 
 2026-09-18: 로컬 Python 3.13과 Docker Python 3.11에서 **129개 테스트 통과**. NCP 형식·URL 제한·분류 제외·QR 이미지 제외·상세 무추출·리포트 단건 추출·메타데이터·MongoDB 필수 저장·readiness를 검증했다. 단위 테스트는 외부 소켓을 차단하며 실제 API 호출 결과와 구분한다. 2026-09-20 로컬 브랜치의 `/ready`는 MongoDB 연결 상태 `on`을 반환했다.
 
-2026-09-30: 외부 API mock과 별도 로컬 MongoDB로 **167개 테스트 통과**(MongoDB 왕복 2개 포함). 신규 임베딩·선정 모듈 및 해당 테스트 4개 파일의 Ruff 검사도 통과했다. 기본 `pytest -q`에서는 MongoDB opt-in 검사 2개를 건너뛴다. 별도 테스트 MongoDB를 준비했을 때만 아래 URI를 지정한다. 테스트는 고유 DB를 만들고 정리하며 Gemini·뉴스 HTTP는 계속 mock한다.
+2026-09-30 선정 구현 단계: 외부 API mock과 별도 로컬 MongoDB로 **167개 테스트 통과**(MongoDB 왕복 2개 포함). 신규 임베딩·선정 모듈 및 해당 테스트 4개 파일의 Ruff 검사도 통과했다. 같은 날 공통 카드·요금제 통일 후 기본 전체 검사는 **180 passed, 2 skipped**, 변경 Python 파일 6개의 Ruff 검사도 통과했다. 추가 계약 테스트는 검색 캐시와 독립적인 메타데이터, 두 API의 요금제·개수·점수·임계값 일치와 OpenAPI 스키마를 확인한다. 이번 후속 검증에서는 실제 MongoDB 왕복을 재실행하지 않았다. 기본 `pytest -q`에서는 MongoDB opt-in 검사 2개를 건너뛴다. 별도 테스트 MongoDB를 준비했을 때만 아래 URI를 지정한다. 테스트는 고유 DB를 만들고 정리하며 Gemini·뉴스 HTTP는 계속 mock한다.
 
 ```bash
 NEWS_MAP_TEST_MONGODB_URI=mongodb://127.0.0.1:27028 .venv/bin/python -m pytest -q
