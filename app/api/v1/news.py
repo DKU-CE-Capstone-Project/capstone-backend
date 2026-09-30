@@ -7,11 +7,14 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.agents.diffbot_client import is_article_image_url
+from app import database, store
 from app.agents import naver_categories
-from app.agents.filter_agent import _content_tokens, _overlap_coefficient
+from app.agents.article_embeddings import EmbeddingUnavailable
+from app.agents.diffbot_client import is_article_image_url
+from app.agents.filter_agent import _content_tokens
 from app.agents.graph_builder import _relevance_score, build_graph
 from app.agents.news_fetcher import fetch_naver_news_page, fetch_news
+from app.agents.related_selector import article_id, select_related
 from app.config import settings
 from app.schemas import (
     GraphResponse,
@@ -25,7 +28,6 @@ from app.schemas import (
     SourceResponse,
     ThumbnailResponse,
 )
-from app import store
 from app.utils import cache_articles, make_news_id, tier_ok
 
 router = APIRouter()
@@ -55,8 +57,7 @@ def _to_news_card(art: dict[str, Any], idx: int = 0) -> NewsCard:
     return NewsCard(
         news_id=art.get("news_id") or make_news_id(art.get("url", "")),
         title=title,
-        summary=(art.get("summary") or art.get("description") or title)
-        if art.get("_news_provider") == "naver" else (title or art.get("summary") or art.get("description", "")),
+        summary=art.get("description") or art.get("summary") or "",
         thumbnail_url=thumb,
         source_name=art.get("source", ""),
         published_at=art.get("published_at", ""),
@@ -84,12 +85,12 @@ async def _naver_search_response(keyword: str, page: int, size: int, sort: str) 
                           total_count=result.total)
 
 
-async def _related_articles(news_id: str, extra: int = 8) -> list[dict[str, Any]]:
+async def _related_articles(news_id: str) -> list[dict[str, Any]]:
     """
-    Return related articles for a cached article.
+    Collect candidates, independently of the final display/tier limit.
 
     Strategy:
-    1. Return other cached articles from the same search (same _search_keyword).
+    1. Collect memory/MongoDB articles from the same search (_search_keyword).
     2. If fewer than 3, re-fetch using the original search keyword.
     """
     center = await store.get_news(news_id)
@@ -97,23 +98,40 @@ async def _related_articles(news_id: str, extra: int = 8) -> list[dict[str, Any]
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found. Search first.")
 
     original_keyword = center.get("_search_keyword", "")
-
-    # 1) Already-cached articles from the same search
-    same_search = [
-        art for nid, art in store.news_cache.items()
-        if nid != news_id and art.get("_search_keyword") == original_keyword
-    ]
+    cap = settings.news_map_candidate_limit
+    # Candidate budget is independent of FREE/PAID and the requested display limit.
+    same_search = {
+        article_id(art): art for nid, art in store.news_cache.items()
+        if original_keyword and nid != news_id and art.get("_search_keyword") == original_keyword
+    }
+    for art in await database.news_candidates(original_keyword, cap + 1):
+        if article_id(art) != news_id:
+            same_search.setdefault(article_id(art), art)
     if len(same_search) >= 3:
-        return same_search[:extra]
+        return [same_search[nid] for nid in sorted(same_search)[:cap]]
 
     # 2) Re-fetch using the original keyword (or first meaningful title word as fallback)
     if not original_keyword:
-        tokens = list(_content_tokens(center.get("title", "")))
+        tokens = sorted(_content_tokens(center.get("title", "")))
         original_keyword = tokens[0] if tokens else center.get("title", "")[:15]
 
-    raw = await fetch_news(original_keyword, page_size=extra + 2)
+    raw = await fetch_news(original_keyword, page_size=cap + 1)
     enriched = await cache_articles([{**a, "_search_keyword": original_keyword} for a in raw])
-    return [a for a in enriched if a.get("news_id") != news_id]
+    for art in enriched:
+        if article_id(art) != news_id:
+            same_search[article_id(art)] = art
+    return [same_search[nid] for nid in sorted(same_search)[:cap]]
+
+
+async def _selected_related(center: dict[str, Any], limit: int, min_relevance: float = 0.0):
+    candidates = await _related_articles(article_id(center))
+    try:
+        return await select_related(center, candidates, limit=limit, min_relevance=min_relevance)
+    except EmbeddingUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="연관 기사 임베딩을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        ) from exc
 
 
 # ── GET /search ───────────────────────────────────────────────────────────────
@@ -216,8 +234,8 @@ async def get_graph(
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
-    related = await _related_articles(news_id, extra=limit + 2)
-    graph = build_graph(center, related[:limit], include_distance=include_distance)
+    related = await _selected_related(center, limit)
+    graph = build_graph(center, [item.article for item in related], include_distance=include_distance)
 
     return GraphResponse(**graph)
 
@@ -235,7 +253,8 @@ async def get_related(
     """
     연관 뉴스를 반환합니다.
     FREE: 최대 3개, relevance_score 미포함.
-    PAID: 제한 없음 + relevance_score 포함.
+    PAID: 요청 limit 적용 + relevance_score 포함.
+    모든 요금제는 같은 임베딩 기반 필터·정렬을 수행합니다.
     """
     center = await store.get_news(news_id)
     if not center:
@@ -244,21 +263,19 @@ async def get_related(
     is_paid = tier_ok(tier, "PAID")
     effective_limit = limit if is_paid else min(limit, 3)
 
-    related = await _related_articles(news_id, extra=effective_limit + 5)
+    related = await _selected_related(center, effective_limit, min_relevance)
 
     items: list[RelatedNewsItem] = []
-    for i, art in enumerate(related[:effective_limit]):
-        score = _relevance_score(center, art) if (is_paid or include_score) else None
-        if min_relevance > 0 and score is not None and score < min_relevance:
-            continue
+    for i, ranked in enumerate(related):
+        art, score = ranked.article, ranked.score
         thumb, _ = _thumb(art, i)
         items.append(
             RelatedNewsItem(
                 news_id=art.get("news_id") or make_news_id(art.get("url", "")),
                 title=art.get("title", ""),
-                summary=art.get("title", "") or art.get("summary") or art.get("description", ""),
+                summary=art.get("description") or art.get("summary") or "",
                 thumbnail_url=thumb,
-                relevance_score=score if is_paid else None,
+                relevance_score=round(score, 6) if is_paid else None,
                 distance=1,
             )
         )

@@ -88,3 +88,19 @@ async def test_flex_failure_does_not_switch_to_standard_or_claude(monkeypatch):
     monkeypatch.setattr(llm, "_generate_claude", forbidden_claude)
     assert await llm.generate("test article") == ""
     assert calls == ["flex"]
+
+
+async def test_embedding_sends_map_model_dimensions_and_task_without_changing_rag(monkeypatch):
+    monkeypatch.setattr(settings, "google_api_key", "unit-test-key")
+    calls = []
+    async def embed_content(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(embeddings=[SimpleNamespace(values=[1.0] * kwargs["config"].output_dimensionality)])
+    monkeypatch.setattr(llm, "_client", lambda: SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(embed_content=embed_content))))
+    assert len(await llm.embed("Title: AI\nDescription: GPU", model="map-model", dimensions=128, task_type="SEMANTIC_SIMILARITY")) == 128
+    assert calls[0]["model"] == "map-model"
+    assert calls[0]["config"].task_type == "SEMANTIC_SIMILARITY"
+    assert len(await llm.embed("legacy RAG query")) == 768
+    assert calls[1]["model"] == settings.embedding_model
+    assert calls[1]["config"].task_type is None

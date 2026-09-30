@@ -292,7 +292,8 @@ async def test_mongo_write_reload_and_cache_reuse(monkeypatch, metadata_ai):
 def test_legacy_document_without_metadata_can_be_read():
     loaded = database.article_from_news_doc({"title": "Old", "summary": "Old summary"})
     assert loaded["keywords"] == [] and loaded["categories"] == []
-    assert loaded["description"] == "Old summary"
+    assert loaded["description"] == ""
+    assert loaded["summary"] == "Old summary"
 
 
 def test_search_source_and_search_again_preserve_body_metadata(

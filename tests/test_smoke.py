@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from app import store
 from app.config import settings
@@ -32,21 +33,71 @@ def test_gdelt_params_match_external_project_defaults() -> None:
     }
 
 
-def test_news_api_summary_prefers_title() -> None:
+@pytest.mark.parametrize("provider", ["naver", "newsapi", "gdelt"])
+def test_news_api_summary_preserves_description(provider: str) -> None:
+    description = "API에서 제공한 기사 설명입니다. " * 20
     article = {
         "news_id": "n1",
         "title": "Displayed title",
         "summary": "Generated summary",
-        "description": "Diffbot body",
+        "description": description,
         "url": "https://example.com/news/1",
+        "_news_provider": provider,
     }
 
     card = _to_news_card(article)
     graph = build_graph(article, [article])
 
-    assert card.summary == "Displayed title"
-    assert graph["center_node"]["summary"] == "Displayed title"
-    assert graph["nodes"][1]["summary"] == "Displayed title"
+    assert card.summary == description
+    assert graph["center_node"]["summary"] == description
+    assert graph["nodes"][1]["summary"] == description
+
+
+def test_news_map_endpoints_preserve_search_descriptions(monkeypatch) -> None:
+    articles = [
+        {
+            "title": f"기사 제목 {index}",
+            "url": f"https://example.com/news/{index}",
+            "source": "example.com",
+            "description": f"기사 {index}의 API 설명입니다. " * 20,
+            "summary": "Generated summary",
+            "published_at": "2026-09-30T00:00:00Z",
+        }
+        for index in range(4)
+    ]
+
+    async def fake_fetch_news(keyword: str, page_size: int = 20):
+        return articles
+
+    async def fake_embed(text: str, **kwargs):
+        return [1.0] + [0.0] * (kwargs.get("dimensions", 768) - 1)
+
+    from app.agents import llm
+    monkeypatch.setattr(llm, "embed", fake_embed)
+    monkeypatch.setattr(news_routes, "fetch_news", fake_fetch_news)
+    search = client.get("/api/v1/news/search?q=기사")
+    assert search.status_code == 200
+    cards = search.json()["news_cards"]
+    descriptions = {card["news_id"]: card["description"] for card in cards}
+    center_id = cards[0]["news_id"]
+    graph = client.get(f"/api/v1/news/{center_id}/graph")
+    related = client.get(f"/api/v1/news/{center_id}/related")
+    assert graph.status_code == related.status_code == 200
+
+    assert graph.json()["center_node"]["summary"] == descriptions[center_id]
+    for item in [*cards, *graph.json()["nodes"], *related.json()["related_news"]]:
+        assert item["summary"] == descriptions[item["news_id"]]
+
+
+@pytest.mark.parametrize("summary", ["Legacy summary", ""])
+def test_news_without_description_does_not_repeat_title(summary: str) -> None:
+    article = {"title": "Displayed title", "summary": summary, "url": "https://example.com/old"}
+    card = _to_news_card(article)
+    graph = build_graph(article, [article])
+
+    assert card.summary == summary
+    assert graph["center_node"]["summary"] == summary
+    assert graph["nodes"][1]["summary"] == summary
 
 
 def test_search_endpoint_preserves_gdelt_thumbnail(monkeypatch) -> None:

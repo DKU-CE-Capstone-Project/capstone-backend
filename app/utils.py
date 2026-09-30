@@ -28,6 +28,11 @@ async def cache_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]
         nid = art.get("news_id") or make_news_id(url or art.get("title", ""))
         previous = await store.get_news(nid)
         merged = dict(art)
+        # Reuse is checked against exact input/config hashes by article_embeddings.
+        if previous:
+            for key in ("embedding", "embedding_metadata", "news_map_embedding"):
+                if key in previous:
+                    merged[key] = previous[key]
         # A fresh search list must not erase a body/metadata obtained by /source.
         # Changed titles are treated as a revision: do not reuse the previous body.
         title = art.get("title_original") or art.get("title")
@@ -61,14 +66,20 @@ async def _persist_to_mongo(enriched: list[dict[str, Any]]) -> None:
     in-memory/API 응답 형태는 건드리지 않으므로 프론트는 영향 없다.
     """
     from app import database
-    from app.agents.llm import embed
+    from app.agents.article_embeddings import EmbeddingUnavailable, article_vector
+
+    semaphore = asyncio.Semaphore(settings.news_map_embedding_concurrency)
 
     async def _one(art: dict[str, Any]) -> None:
-        text = f"{art.get('title','')} {art.get('summary') or art.get('description','')}".strip()
-        vec = await embed(text)
+        try:
+            async with semaphore:
+                await article_vector(art, "rag", persist=False)
+        except EmbeddingUnavailable:
+            # Search can still store articles without RAG; news-map selection reports
+            # its own explicit 503 if a compatible semantic vector is unavailable.
+            art.pop("embedding", None)
+            art.pop("embedding_metadata", None)
         doc = database.news_doc_from_article(art)
-        if vec:
-            doc["embedding"] = vec
         await database.save_news(doc)
 
     try:

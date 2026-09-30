@@ -1,14 +1,14 @@
 # EconMind Backend
 
 실시간 경제 뉴스 검색·뉴스맵·AI 리포트 API. FastAPI / Python 3.11 이상.
-프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)이며, 이 문서는 **`codex/news-session-20260918` 작업 브랜치**의 뉴스 경로를 설명한다. 이 변경은 [백엔드 PR #6](https://github.com/DKU-CE-Capstone-Project/capstone-backend/pull/6)에서 검토 중이고 코드 `main`에는 아직 병합되지 않았다. 운영 서버의 현재 상태는 여기서 검증하지 않았다. [브랜치 API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)에는 전체 18개 operation과 검증 범위가 있다.
+프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 이 README는 **2026-09-30 로컬 `article-api` 브랜치**의 뉴스 경로와 뉴스맵 선정 설정을 설명한다. 기존 뉴스 세션 경로는 정본의 2026-09-21 병합 기록을 따르며, 이번 뉴스맵 변경은 로컬 구현·검증 범위다. [API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)의 과거 계약과 날짜별 추가 내용을 구분해 읽는다. 이번 변경의 원격 반영·운영 배포는 수행하지 않았다.
 
 ## 뉴스 공급원 변경 이유
 
 **GDELT에서 반복되는 HTTP 429 오류로 검색과 테스트가 어려워져 기본 공급원을 NCP NAVER API HUB로 변경했다. 해외 뉴스는 검토 예정이다.**
 기존 GDELT·NewsAPI 코드는 선택 가능한 이전 경로로 남아 있다. GDELT 429 대응용 별도 백그라운드 수집 기능은 적용하지 않는다. 기존 `/jobs` 데모 큐와 이번 뉴스 검색은 별개다.
 
-## 작업 브랜치의 처리 순서
+## 뉴스 처리 순서
 
 1. 프론트가 `/api/v1/news/search?q=반도체&size=20`을 호출한다. NCP 검색 결과 20건 중 `news.naver.com` 또는 그 하위 도메인의 `link`가 있는 기사만 남긴다. 부족한 수를 추가 검색으로 채우지 않는다.
 2. NAVER 기사 HTML의 `em.media_end_categorize_item`을 확인한다. **정치 또는 사회가 포함된 기사와 분류를 확인하지 못한 기사는 제외**한다. 같은 HTML의 `og:image`를 썸네일로 사용한다. 검색 단계에서는 Diffbot을 호출하지 않는다.
@@ -25,6 +25,33 @@
 - 리포트용 Diffbot 추출은 NAVER URL을 사용하며 `meta.og`의 기사 이미지를 우선한다. QR 코드 URL·캡션 등은 제외하고 이미지가 없으면 기본 이미지를 쓴다.
 - `description`, `naver_url`, `naver_categories`, `keywords`, `categories`, `metadata_extraction`, `content_source_url`을 MongoDB 왕복 변환에서 보존한다.
 - Diffbot 성공 캐시는 1시간, 실패 캐시는 30초이며 이미지 선택 규칙 버전을 키에 포함한다. NAVER 분류 캐시는 5분, 실패 캐시는 15초다.
+
+## 뉴스맵 주변 기사 선정 (2026-09-30)
+
+이미 정해진 중심 기사의 제목·NAVER description을 기준으로 주변 기사를 선정한다. 최초 중심 기사 선정과 실제 다단계 그래프 확장은 이번 범위에서 변경하지 않았다.
+
+1. 같은 검색어의 메모리·MongoDB 기사를 후보로 모은다. 후보 예산은 기본 40건이며 최종 표시 limit과 별개다. 후보가 3건 미만이면 같은 검색어로 다시 검색한다.
+2. 중심 자신·같은 ID/정규화 URL/정규화 제목과 설명의 중복·입력 없는 후보를 제외한다. 같은 주제의 별개 기사는 일괄 중복 처리하지 않는다.
+3. 기사별 `Title: {title}\nDescription: {description}` 형식으로 Gemini 임베딩을 생성하거나 저장 벡터를 재사용한다. HTML·공백을 정리하고 제목 500자·설명 6,000자까지 사용한다. 설명이 없으면 제목만 사용하며 본문·생성 summary를 보충하지 않는다. 뉴스맵에서는 Diffbot을 새로 호출하지 않는다.
+4. 서버에서 코사인을 계산하고, 근거 있는 키워드의 보조 점수와 등록된 조직명만 겹치는 경우의 감점을 적용한다. 최소 연관도 필터 → 점수 내림차순·동점 뉴스 ID 오름차순 → 최종 개수 제한 순으로 처리한다. 통과 기사가 부족해도 다른 기사로 채우지 않는다.
+
+`/related`와 `/graph`는 [공통 선정 함수](app/agents/related_selector.py)를 사용한다. FREE/BASIC도 내부 평가·필터·정렬을 수행하며 마지막에 `min(limit, 3)`건만 반환하고 `relevance_score`는 숨긴다. PAID는 요청 limit에 따라 반환하고 점수를 노출한다. `tier`는 쿼리 값이며 실제 구독 확인 기능은 아직 없다. `/graph`는 기존대로 tier 입력이 없고 요청 limit을 적용한다. 모든 주변 노드는 직접 연결이므로 `distance=1`이다. `/relations`의 기존 단어 중첩 점수는 별도 의미다.
+
+최종 점수는 `clip((1-w) * max(cosine, 0) + w * J - p, 0, 1)`이다. `J`는 조직명을 제외한 키워드 집합의 Jaccard 값이며, `p`는 등록된 조직명이 겹치면서 다른 핵심어는 겹치지 않을 때만 적용한다. `AI`, `HBM`, `HBM3E`, `금리`와 확인된 별칭을 보존하고, 같은 제목·설명에서 추출된 메타데이터는 집합으로 합쳐 반복 가산하지 않는다. 현재 가중치·임계값은 **실제 뉴스 품질 평가 전 초기값**이다.
+
+| 환경변수 | 기본값 | 역할 |
+|---|---|---|
+| `NEWS_MAP_EMBEDDING_MODEL` | `gemini-embedding-001` | 뉴스맵 전용 모델 |
+| `NEWS_MAP_EMBEDDING_DIMENSIONS` | `768` | 요청·검증 차원 |
+| `NEWS_MAP_EMBEDDING_TASK_TYPE` | `SEMANTIC_SIMILARITY` | 중심·후보에 같은 용도 적용 |
+| `NEWS_MAP_CANDIDATE_LIMIT` | `40` | 최종 표시 수와 별개인 후보 상한 |
+| `NEWS_MAP_EMBEDDING_CONCURRENCY` | `3` | 벡터 생성 동시성 |
+| `NEWS_MAP_MIN_RELEVANCE` | `0.65` | 최소 최종 점수; 요청값과 큰 쪽 적용 |
+| `NEWS_MAP_KEYWORD_WEIGHT` | `0.10` | 보조 키워드 비중 |
+| `NEWS_MAP_ENTITY_ONLY_PENALTY` | `0.10` | 등록된 조직명만 겹칠 때 감점 |
+| `EMBEDDING_TIMEOUT_SECONDS` | `30` | 기존 임베딩 호출 제한 시간 |
+
+[벡터 저장·재사용](app/agents/article_embeddings.py)은 입력 SHA-256·모델·차원·용도·전처리 버전을 확인한다. 뉴스맵은 `news_map_embedding`, 기존 리포트 RAG는 `embedding`·`embedding_metadata`와 `EMBEDDING_MODEL`·768차원 인덱스를 사용한다. 내용·설정이 바뀐 기사만 필요할 때 다시 생성하며 전체 DB 삭제·재생성은 하지 않는다. 평가에 필요한 벡터가 없거나 API 실패·차원 불일치 등이 발생하면 503을 반환한다. 실패를 0점이나 일부 후보의 성공 목록으로 처리하지 않는다.
 
 ## 로컬 실행
 
@@ -77,7 +104,7 @@ NCP 요청은 `https://naverapihub.apigw.ntruss.com/search/v1/news`에 `X-NCP-AP
 | `POST /analyze` | 기존 분석 호환 경로 |
 | `GET`·`DELETE /api/v1/session`, `POST /api/v1/session/mindmap/expand`·`collapse`, `DELETE /api/v1/session/mindmap` | 쿠키 기반 세션 식별·마인드맵 상태. 아래 「세션」 참고 |
 
-전체 요청·응답 형식은 [뉴스 세션 API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)와 해당 브랜치 실행 중인 `/docs`를 참고한다. `/health`는 실제 DB ping이 아니며 `/ready`가 이를 검사한다. `/graph`·`/related`는 구현돼 있지만 현재 프론트 뉴스맵 화면은 호출하지 않는다. 마인드맵 알고리즘 적용은 [보류 결정](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/04-roadmap.md#마인드맵-알고리즘-보류-결정-2026-09-19)에 따른다. NCP 인증·응답 오류는 안전한 메시지로 전달하며, 검색 오류를 mock 뉴스로 대체하지 않는다.
+전체 요청·응답 형식은 [뉴스 세션 API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)와 해당 브랜치 실행 중인 `/docs`를 참고한다. `/health`는 실제 DB ping이 아니며 `/ready`가 이를 검사한다. 현재 프론트 `article-api`는 `/related?tier=FREE` 결과를 서버 순서대로 표시하고 `/graph`로 보충하지 않는다. 주변 기사 선정만 제한적으로 재개했으며, 키워드맵 알고리즘·다단계 확장·세션 상태 연동은 계속 보류한다. NCP 인증·응답 오류는 안전한 메시지로 전달하며, 검색 오류를 mock 뉴스로 대체하지 않는다.
 
 ## 세션 (쿠키 기반 사용자 식별)
 
@@ -117,6 +144,14 @@ docker build --platform linux/amd64 -t econmind-backend:release-20260918 .
 ```
 
 2026-09-18: 로컬 Python 3.13과 Docker Python 3.11에서 **129개 테스트 통과**. NCP 형식·URL 제한·분류 제외·QR 이미지 제외·상세 무추출·리포트 단건 추출·메타데이터·MongoDB 필수 저장·readiness를 검증했다. 단위 테스트는 외부 소켓을 차단하며 실제 API 호출 결과와 구분한다. 2026-09-20 로컬 브랜치의 `/ready`는 MongoDB 연결 상태 `on`을 반환했다.
+
+2026-09-30: 외부 API mock과 별도 로컬 MongoDB로 **167개 테스트 통과**(MongoDB 왕복 2개 포함). 신규 임베딩·선정 모듈 및 해당 테스트 4개 파일의 Ruff 검사도 통과했다. 기본 `pytest -q`에서는 MongoDB opt-in 검사 2개를 건너뛴다. 별도 테스트 MongoDB를 준비했을 때만 아래 URI를 지정한다. 테스트는 고유 DB를 만들고 정리하며 Gemini·뉴스 HTTP는 계속 mock한다.
+
+```bash
+NEWS_MAP_TEST_MONGODB_URI=mongodb://127.0.0.1:27028 .venv/bin/python -m pytest -q
+```
+
+뒤쪽 후보 우선 선정, FREE 필터·정렬, 중심 변경, 적은 결과, 중복 제외, API 선정 일치, 빈 설명·벡터 실패·재사용·설정 변경을 검사했다. 실제 Gemini 성공 응답·한국어 뉴스 선정 품질·가중치 최적화·운영 배포는 검증하지 않았다. 날짜별 상세 근거는 정본 `docs/99-verification.md`에 기록한다.
 서버 배포·백업 절차는 [배포 런북](https://github.com/DKU-CE-Capstone-Project/capstone-deploy)을, 실제 검증 범위와 운영 미검증 상태는 [검증 기록](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/99-verification.md#2026-09-20-뉴스-세션-브랜치-api-검증)을 따른다.
 
 남은 범위: JWT·사용자별 세션 통합, reports/strategies 설계 정합화와 strict validator 승격, 종목 매핑, 해외 뉴스 공급원 검토. 생성 실패 안내용 백엔드 fallback 리포트는 남아 있으며, 프론트는 이를 성공 리포트로 표시하지 않는다.

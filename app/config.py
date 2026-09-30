@@ -86,6 +86,16 @@ class Settings(BaseSettings):
 
     # ── AI 에이전트 (RAG 그라운딩 + 검증) ────────────────────────────────
     embedding_model: str = "gemini-embedding-001"  # Gemini 임베딩 (768차원 요청, generate와 별도 쿼터)
+    # News-map vectors are isolated from the existing 768d report RAG index.
+    news_map_embedding_model: str = "gemini-embedding-001"
+    news_map_embedding_dimensions: int = Field(default=768, ge=128, le=3072)
+    news_map_embedding_task_type: Literal["SEMANTIC_SIMILARITY", "CLUSTERING"] = "SEMANTIC_SIMILARITY"
+    news_map_candidate_limit: int = Field(default=40, ge=3, le=100)
+    news_map_embedding_concurrency: int = Field(default=3, ge=1, le=10)
+    # Initial values, pending evaluation on real Korean news pairs.
+    news_map_min_relevance: float = Field(default=0.65, ge=0, le=1)
+    news_map_keyword_weight: float = Field(default=0.10, ge=0, le=0.3)
+    news_map_entity_only_penalty: float = Field(default=0.10, ge=0, le=1)
     use_rag: bool = True       # 리포트 생성 시 벡터검색으로 유사 과거 뉴스 근거 주입
     use_critic: bool = True    # 생성된 리포트를 검증(critic) 에이전트로 점검
 

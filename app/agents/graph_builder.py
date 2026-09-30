@@ -15,13 +15,6 @@ _FALLBACK_UNSPLASH = [
 ]
 
 
-def _distance(center: dict[str, Any], other: dict[str, Any]) -> int:
-    """1 if title-token overlap ≥ 0.4, otherwise 2."""
-    a = _content_tokens(center.get("title", ""))
-    b = _content_tokens(other.get("title", ""))
-    return 1 if _overlap_coefficient(a, b) >= 0.4 else 2
-
-
 def _relevance_score(a: dict[str, Any], b: dict[str, Any]) -> float:
     """Overlap coefficient of title tokens as a 0-1 relevance score."""
     ta = _content_tokens(a.get("title", "") + " " + a.get("description", ""))
@@ -46,12 +39,13 @@ def build_graph(
         Dict matching GraphResponse schema.
     """
     center_id = center.get("news_id") or make_news_id(center.get("url", ""))
-    center_summary = center.get("title", "") or center.get("summary") or center.get("description", "")
+    # The frontend uses graph summaries as article descriptions in the detail view.
+    center_summary = center.get("description") or center.get("summary") or ""
 
     center_node = {
         "news_id": center_id,
         "title": center.get("title", ""),
-        "summary": center_summary[:200],
+        "summary": center_summary,
         "distance": 0,
         "is_center": True,
     }
@@ -61,13 +55,15 @@ def build_graph(
 
     for i, art in enumerate(related):
         nid = art.get("news_id") or make_news_id(art.get("url", f"unknown-{i}"))
-        dist = _distance(center, art) if include_distance else 1
-        summary = art.get("title", "") or art.get("summary") or art.get("description", "")
+        # Every selected article is directly connected to the center. Similarity
+        # is not a hop count; depth remains reserved for future multi-hop expansion.
+        dist = 1
+        summary = art.get("description") or art.get("summary") or ""
 
         nodes.append({
             "news_id": nid,
             "title": art.get("title", ""),
-            "summary": summary[:200],
+            "summary": summary,
             "distance": dist,
             "is_center": False,
         })
