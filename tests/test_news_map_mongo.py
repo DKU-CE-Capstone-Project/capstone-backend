@@ -107,6 +107,41 @@ async def test_local_mongo_endpoints_pool_has_same_order_after_restart(local_mon
     after = await news._selected_related(await store.get_news(center_id), 10)
     assert [r.article["news_id"] for r in after] == [r.article["news_id"] for r in before]
     free = await news.get_related(center_id, limit=10, min_relevance=0, include_score=False, tier="FREE")
-    graph = await news.get_graph(center_id, depth=3, limit=10, include_distance=True)
-    assert [a["news_id"] for a in free["related_news"]] == [a.news_id for a in graph.nodes[1:4]]
-    assert len(graph.nodes) == 5 and len(free["related_news"]) == 3
+    graph = await news.get_graph(center_id, depth=3, limit=10, include_distance=True,
+                                 min_relevance=0, include_score=False, tier="FREE")
+    assert [a.news_id for a in free.related_news] == [a.news_id for a in graph.nodes[1:]]
+    assert len(graph.nodes) == 4 and len(free.related_news) == 3
+
+
+async def test_local_mongo_supplement_card_and_map_vectors_survive_restart(local_mongo, monkeypatch):
+    from tests.test_news_map_diversity import release
+    from tests.test_related_supplement import new_angle
+
+    calls, searches = [], []
+
+    async def embed(text, **kwargs):
+        calls.append((text, kwargs))
+        return [1.0] + [0.0] * (kwargs.get("dimensions", 768) - 1)
+
+    async def fetch(query, page_size):
+        searches.append(query)
+        return [new_angle()]
+
+    monkeypatch.setattr(llm, "embed", embed)
+    monkeypatch.setattr(news, "fetch_news", fetch)
+    monkeypatch.setattr(settings, "news_map_supplement_max_searches", 1)
+    monkeypatch.setattr(settings, "news_provider", "naver")
+    monkeypatch.setattr(settings, "use_mock_news", False)
+    await cache_articles([release("center"), release("copy")])
+    before = await news._selected_related(await store.get_news("center"), 1)
+    assert [item.article["news_id"] for item in before] == ["reaction"]
+    saved = await local_mongo[database.NEWS].find_one({"news_id": "reaction"})
+    assert "embedding" not in saved  # No extra RAG generation during supplement.
+    assert saved["news_map_embedding"]["metadata"]["purpose"] == "news_map"
+    count = len(calls)
+    store.news_cache.clear()
+    embeddings._cache.clear()
+    after = await news._selected_related(await store.get_news("center"), 1)
+    assert [item.article["news_id"] for item in after] == ["reaction"]
+    assert after[0].article["description"] == new_angle()["description"]
+    assert len(calls) == count and len(searches) == 1  # DB vectors + process-local query cache.

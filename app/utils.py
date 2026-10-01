@@ -15,7 +15,7 @@ def make_news_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:12]
 
 
-async def cache_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def cache_articles(articles: list[dict[str, Any]], *, news_map_only: bool = False) -> list[dict[str, Any]]:
     """Assign news_id, persist to in-memory store, and (if enabled) write-through to
     MongoDB with a Gemini embedding for vector search. Returns enriched list.
 
@@ -47,17 +47,19 @@ async def cache_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]
                 merged["cleaned_content"] = previous["cleaned_content"]
         prepared.append({**merged, "news_id": nid})
 
-    enriched = await enrich_articles(prepared)
+    # Map supplements need grounded cards and map vectors, not Flex generation
+    # or another RAG embedding. Regular search retains the existing pipeline.
+    enriched = await enrich_articles(prepared, allow_llm=not news_map_only)
     for art in enriched:
         store.news_cache[art["news_id"]] = art
 
     if settings.use_mongodb and enriched:
-        await _persist_to_mongo(enriched)
+        await _persist_to_mongo(enriched, embed_rag=not news_map_only)
 
     return enriched
 
 
-async def _persist_to_mongo(enriched: list[dict[str, Any]]) -> None:
+async def _persist_to_mongo(enriched: list[dict[str, Any]], *, embed_rag: bool = True) -> None:
     """각 기사에 임베딩 부여 후 MongoDB news에 write-through (벡터검색 근거).
 
     in-memory dict 를 그대로 넣지 않고 database.news_doc_from_article() 로
@@ -66,14 +68,26 @@ async def _persist_to_mongo(enriched: list[dict[str, Any]]) -> None:
     in-memory/API 응답 형태는 건드리지 않으므로 프론트는 영향 없다.
     """
     from app import database
-    from app.agents.article_embeddings import EmbeddingUnavailable, article_vector
+    from app.agents.article_embeddings import (
+        EmbeddingUnavailable,
+        _input,
+        _matches,
+        _record,
+        article_vector,
+    )
 
     semaphore = asyncio.Semaphore(settings.news_map_embedding_concurrency)
 
     async def _one(art: dict[str, Any]) -> None:
         try:
-            async with semaphore:
-                await article_vector(art, "rag", persist=False)
+            if embed_rag:
+                async with semaphore:
+                    await article_vector(art, "rag", persist=False)
+            elif not _matches(_record(art, "rag"), _input(art, "rag")[1]):
+                # Never persist an old RAG vector for revised text. The optional
+                # RAG slot can be filled by a later regular search.
+                art.pop("embedding", None)
+                art.pop("embedding_metadata", None)
         except EmbeddingUnavailable:
             # Search can still store articles without RAG; news-map selection reports
             # its own explicit 503 if a compatible semantic vector is unavailable.

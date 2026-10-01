@@ -1,6 +1,7 @@
 """All /api/v1/news/* endpoints."""
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -13,7 +14,13 @@ from app.agents.article_embeddings import EmbeddingUnavailable
 from app.agents.filter_agent import _content_tokens
 from app.agents.graph_builder import _relevance_score, build_graph
 from app.agents.news_fetcher import fetch_naver_news_page, fetch_news
-from app.agents.related_selector import article_id, select_related
+from app.agents.related_candidates import grounded_queries, supplemental_search
+from app.agents.related_selector import (
+    article_id,
+    identity_keys,
+    select_related,
+    unique_candidates,
+)
 from app.config import settings
 from app.news_cards import thumbnail as _thumb
 from app.news_cards import to_news_card as _to_news_card
@@ -55,9 +62,8 @@ async def _related_articles(news_id: str) -> list[dict[str, Any]]:
     """
     Collect candidates, independently of the final display/tier limit.
 
-    Strategy:
-    1. Collect memory/MongoDB articles from the same search (_search_keyword).
-    2. If fewer than 3, re-fetch using the original search keyword.
+    Collect original-search memory/MongoDB candidates without an external request.
+    Supplemental collection is decided after relevance/repeat filtering.
     """
     center = await store.get_news(news_id)
     if not center:
@@ -73,19 +79,6 @@ async def _related_articles(news_id: str) -> list[dict[str, Any]]:
     for art in await database.news_candidates(original_keyword, cap + 1):
         if article_id(art) != news_id:
             same_search.setdefault(article_id(art), art)
-    if len(same_search) >= 3:
-        return [same_search[nid] for nid in sorted(same_search)[:cap]]
-
-    # 2) Re-fetch using the original keyword (or first meaningful title word as fallback)
-    if not original_keyword:
-        tokens = sorted(_content_tokens(center.get("title", "")))
-        original_keyword = tokens[0] if tokens else center.get("title", "")[:15]
-
-    raw = await fetch_news(original_keyword, page_size=cap + 1)
-    enriched = await cache_articles([{**a, "_search_keyword": original_keyword} for a in raw])
-    for art in enriched:
-        if article_id(art) != news_id:
-            same_search[article_id(art)] = art
     return [same_search[nid] for nid in sorted(same_search)[:cap]]
 
 
@@ -95,7 +88,43 @@ async def _selected_related(
     limit = limit if tier_ok(tier, "PAID") else min(limit, 3)
     candidates = await _related_articles(article_id(center))
     try:
-        return await select_related(center, candidates, limit=limit, min_relevance=min_relevance)
+        selected = await select_related(center, candidates, limit=limit, min_relevance=min_relevance)
+        if (len(selected) >= limit or not settings.news_map_supplement_max_searches
+                or not settings.news_map_supplement_candidate_limit):
+            return selected
+        # The legacy GDELT/NewsAPI path permits silent sample/empty fallbacks.
+        # Only the strict NAVER path (or explicitly configured mock fixtures)
+        # may supply extra candidates; the search endpoint's contract is unchanged.
+        if settings.news_provider != "naver" and not settings.mock_news_active:
+            return selected
+        extra_count = 0
+        seen = set().union(identity_keys(center), *(identity_keys(a) for a in candidates))
+        async with asyncio.timeout(settings.news_map_supplement_timeout_seconds):
+            for query in grounded_queries(center)[:settings.news_map_supplement_max_searches]:
+                raw = await supplemental_search(query, fetch_news)
+                fresh = []
+                for art in unique_candidates(center, raw):
+                    keys = identity_keys(art)
+                    if keys & seen:
+                        continue
+                    seen.update(keys)
+                    fresh.append(art)
+                    if extra_count + len(fresh) >= settings.news_map_supplement_candidate_limit:
+                        break
+                if fresh:
+                    # Preserve any earlier search membership on previously cached articles.
+                    enriched = await cache_articles([
+                        {**a, "_search_keyword": store.news_cache.get(article_id(a), {}).get("_search_keyword") or query}
+                        for a in fresh
+                    ], news_map_only=True)
+                    candidates.extend(enriched)
+                    extra_count += len(enriched)
+                    selected = await select_related(center, candidates, limit=limit, min_relevance=min_relevance)
+                if len(selected) >= limit or extra_count >= settings.news_map_supplement_candidate_limit:
+                    break
+        return selected
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="연관 기사 추가 수집·선정 시간이 초과되었습니다.") from exc
     except EmbeddingUnavailable as exc:
         raise HTTPException(
             status_code=503,
@@ -229,7 +258,8 @@ async def get_related(
     연관 뉴스를 반환합니다.
     FREE: 최대 3개, relevance_score 미포함.
     PAID: 요청 limit 적용 + relevance_score 포함.
-    모든 요금제는 같은 임베딩 기반 필터·정렬을 수행합니다.
+    모든 요금제는 같은 관련성·반복 보도 필터와 MMR을 수행합니다.
+    응답 순서는 다양성 선정 순서이며 점수는 중심과의 연관도입니다.
     """
     center = await store.get_news(news_id)
     if not center:

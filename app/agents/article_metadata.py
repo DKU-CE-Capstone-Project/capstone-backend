@@ -216,7 +216,7 @@ def _reusable(result: dict[str, Any], fingerprint: str) -> bool:
     )
 
 
-async def extract_metadata(article: dict[str, Any]) -> dict[str, Any]:
+async def extract_metadata(article: dict[str, Any], *, allow_llm: bool = True) -> dict[str, Any]:
     """Return validated metadata plus provenance; failures use rules and retry after 60s."""
     title, body, basis = _input(article)
     has_key = bool(settings.google_api_key)
@@ -249,6 +249,21 @@ async def extract_metadata(article: dict[str, Any]) -> dict[str, Any]:
             _cache.move_to_end(fingerprint)
             return deepcopy(cached)
 
+    if not allow_llm and use_ai:
+        # Supplemental map collection may reuse already extracted AI metadata,
+        # but does not wait for Flex generation. Keep local results in a distinct
+        # mode/hash so a later normal search can still perform AI extraction.
+        use_ai = False
+        mode[0] = False
+        fingerprint = hashlib.sha256(
+            json.dumps([VERSION, title, body, basis, mode], ensure_ascii=False).encode()
+        ).hexdigest()
+        if _reusable(article, fingerprint):
+            return deepcopy({k: article[k] for k in ("keywords", "categories", "metadata_extraction")})
+        cached = _cache.get(fingerprint)
+        if cached:
+            return deepcopy(cached)
+
     text = f"{title}\n{body}"
     method, reason = (
         "rules",
@@ -256,6 +271,8 @@ async def extract_metadata(article: dict[str, Any]) -> dict[str, Any]:
     )
     if settings.mock_news_active:
         reason = "mock_mode"
+    elif not allow_llm:
+        reason = "news_map_supplement"
     result = _rules(title, text)
     if not title and not body:
         reason = "empty_input"
@@ -292,13 +309,13 @@ async def extract_metadata(article: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-async def enrich_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def enrich_articles(articles: list[dict[str, Any]], *, allow_llm: bool = True) -> list[dict[str, Any]]:
     """Bound per-batch concurrency; each article's failures stay local to that article."""
     semaphore = asyncio.Semaphore(settings.metadata_concurrency)
 
     async def one(article: dict[str, Any]) -> dict[str, Any]:
         async with semaphore:
-            return await extract_metadata(article)
+            return await extract_metadata(article, allow_llm=allow_llm)
 
     # Identical content within a batch shares one request even before it reaches the cache.
     tasks = {}

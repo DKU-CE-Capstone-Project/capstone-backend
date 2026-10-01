@@ -96,6 +96,19 @@ class Settings(BaseSettings):
     news_map_min_relevance: float = Field(default=0.65, ge=0, le=1)
     news_map_keyword_weight: float = Field(default=0.10, ge=0, le=0.3)
     news_map_entity_only_penalty: float = Field(default=0.10, ge=0, le=1)
+    news_map_mmr_lambda: float = Field(default=0.70, ge=0, le=1)
+    news_map_repeat_cosine: float = Field(default=0.92, ge=0, le=1)
+    news_map_repeat_text_similarity: float = Field(default=0.55, ge=0, le=1)
+    news_map_repeat_short_text_similarity: float = Field(default=0.85, ge=0, le=1)
+    news_map_repeat_max_hours: float = Field(default=48, gt=0, le=168)
+    news_map_repeat_description_min_chars: int = Field(default=40, ge=0, le=500)
+    news_map_repeat_novelty_ratio: float = Field(default=0.25, ge=0, le=1)
+    # Extra work starts only after relevance/repeat filtering leaves a shortage.
+    news_map_supplement_max_searches: int = Field(default=2, ge=0, le=3)
+    news_map_supplement_page_size: int = Field(default=12, ge=1, le=20)
+    news_map_supplement_candidate_limit: int = Field(default=20, ge=0, le=60)
+    news_map_supplement_timeout_seconds: float = Field(default=20, gt=0, le=60)
+    news_map_supplement_cache_ttl_seconds: float = Field(default=60, gt=0, le=600)
     use_rag: bool = True       # 리포트 생성 시 벡터검색으로 유사 과거 뉴스 근거 주입
     use_critic: bool = True    # 생성된 리포트를 검증(critic) 에이전트로 점검
 

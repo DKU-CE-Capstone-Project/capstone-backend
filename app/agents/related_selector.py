@@ -1,4 +1,4 @@
-"""Rank all collected candidates before applying display/tier limits."""
+"""Relevance gate, repeated-information cleanup, then deterministic MMR."""
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +16,7 @@ from app.agents.article_metadata import (
     _contains,
     _grounded,
 )
+from app.agents.repeated_coverage import event_evidence, repeated_information
 from app.config import settings
 from app.utils import make_news_id
 
@@ -49,6 +50,24 @@ def identity_keys(article: dict[str, Any]) -> set[str]:
     if title:
         keys.add(f"text:{title}\n{description}")
     return keys
+
+
+def article_key(article: dict[str, Any]) -> tuple[str, ...]:
+    """A total order also for conflicting revisions with the same supplied ID."""
+    return (article_id(article), canonical_url(article.get("url")), map_text(article),
+            clean_text(article.get("published_at")), clean_text(article.get("source")))
+
+
+def unique_candidates(center: dict[str, Any], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen = identity_keys(center)
+    unique = []
+    for article in sorted(candidates, key=article_key):
+        keys = identity_keys(article)
+        if keys & seen or not map_text(article):
+            continue
+        seen.update(keys)
+        unique.append(article)
+    return unique
 
 
 def keyword_tokens(article: dict[str, Any]) -> set[str]:
@@ -97,18 +116,11 @@ async def select_related(
     center: dict[str, Any], candidates: list[dict[str, Any]], *, limit: int,
     min_relevance: float = 0.0,
 ) -> list[RankedArticle]:
-    seen = identity_keys(center)
-    unique = []
-    # Stable representatives for identical copies, independent of candidate order.
-    for article in sorted(candidates, key=article_id):
-        keys = identity_keys(article)
-        if keys & seen or not map_text(article):
-            continue
-        seen.update(keys)
-        unique.append(article)
-    if not unique:
+    unique = unique_candidates(center, candidates)
+    if not unique or limit <= 0:
         return []
     center_vector = await article_vector(center)
+    vectors = {}
     semaphore = asyncio.Semaphore(settings.news_map_embedding_concurrency)
     center_tokens = keyword_tokens(center)
     entities = {word.casefold() for word in ENTITIES}
@@ -116,6 +128,7 @@ async def select_related(
     async def evaluate(article: dict[str, Any]) -> RankedArticle:
         async with semaphore:
             vector = await article_vector(article)
+        vectors[article_id(article)] = vector
         cosine = cosine_similarity(center_vector, vector)
         tokens = keyword_tokens(article)
         shared = center_tokens & tokens
@@ -132,5 +145,45 @@ async def select_related(
     ranked = await asyncio.gather(*(evaluate(article) for article in unique))
     threshold = max(settings.news_map_min_relevance, min_relevance)
     ranked = [item for item in ranked if item.score >= threshold]
-    ranked.sort(key=lambda item: (-item.score, article_id(item.article)))
-    return ranked[:limit]
+    ranked.sort(key=lambda item: (-item.score, -len(clean_text(item.article.get("description"))),
+                                  article_key(item.article)))
+    evidence = {article_id(item.article): event_evidence(item.article) for item in ranked}
+    center_evidence = event_evidence(center)
+    # Each candidate must be checked directly against the center, before MMR.
+    ranked = [item for item in ranked if not repeated_information(
+        center_evidence, evidence[article_id(item.article)], item.cosine)]
+    pair_scores: dict[tuple[str, str], float] = {}
+
+    def similarity(a: RankedArticle, b: RankedArticle) -> float:
+        key = tuple(sorted((article_id(a.article), article_id(b.article))))
+        if key not in pair_scores:
+            pair_scores[key] = cosine_similarity(vectors[key[0]], vectors[key[1]])
+        return pair_scores[key]
+
+    groups: list[list[RankedArticle]] = []
+    for item in ranked:
+        for group in groups:
+            # Complete-link admission, not connected components: A~B and B~C
+            # alone cannot collapse A and C into one event/representative.
+            if all(repeated_information(evidence[article_id(item.article)],
+                                        evidence[article_id(member.article)], similarity(item, member))
+                   for member in group):
+                group.append(item)
+                break
+        else:
+            groups.append([item])
+    remaining = [group[0] for group in groups]
+    selected: list[RankedArticle] = []
+    weight = settings.news_map_mmr_lambda
+    while remaining and len(selected) < limit:
+        if not selected:
+            best = remaining[0]  # Highest relevance, deterministic representative ties.
+        else:
+            best = min(remaining, key=lambda item: (
+                -round(weight * item.score - (1 - weight) * max(similarity(item, prev) for prev in selected), 12),
+                -item.score, article_key(item.article),
+            ))
+        selected.append(best)
+        remaining.remove(best)
+    # score is always center relevance; MMR's selection score is private.
+    return selected
