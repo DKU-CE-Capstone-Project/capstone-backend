@@ -68,16 +68,9 @@ class SourceResponse(BaseModel):
 
 # ── /api/v1/news/{id}/graph ───────────────────────────────────────────────────
 
-class SameStoryArticle(NewsCard):
-    """Another outlet's report repeating a displayed node's information. Never scored."""
-
-
 class NewsMapCard(NewsCard):
     distance: int
     relevance_score: float | None = None  # PAID only; the center has no pair score.
-    # Grouped repeats do not consume neighbour slots; ordered by publication time.
-    same_story: list[SameStoryArticle] = Field(default_factory=list)
-    same_story_total: int = 0
 
 
 class NewsMapSelection(BaseModel):
@@ -116,8 +109,6 @@ class RelatedNewsItem(NewsMapCard):
 
 class RelatedResponse(BaseModel):
     related_news: list[RelatedNewsItem]
-    center_same_story: list[SameStoryArticle] = Field(default_factory=list)
-    center_same_story_total: int = 0
     selection: NewsMapSelection | None = None
 
 

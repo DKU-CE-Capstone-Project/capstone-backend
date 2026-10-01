@@ -107,7 +107,6 @@ class Settings(BaseSettings):
     news_map_repeat_max_hours: float = Field(default=48, gt=0, le=168)
     news_map_repeat_description_min_chars: int = Field(default=40, ge=0, le=500)
     news_map_repeat_novelty_ratio: float = Field(default=0.25, ge=0, le=1)
-    news_map_same_story_limit: int = Field(default=10, ge=0, le=50)
     # Expansion starts only after relevance/repeat cleanup leaves a shortage.
     news_map_supplement_max_searches: int = Field(default=3, ge=0, le=5)
     news_map_supplement_page_size: int = Field(default=20, ge=1, le=50)

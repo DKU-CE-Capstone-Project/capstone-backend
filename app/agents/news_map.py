@@ -1,7 +1,7 @@
 """Bounded news-map candidate collection, staged expansion and selection status.
 
 Order: cached original-search pool (about 20 unique) -> identity de-duplication
--> Gemini relevance + minimum gate -> same-story grouping -> MMR -> display
+-> Gemini relevance + minimum gate -> direct repetition exclusion + MMR -> display
 limit. Only when meaningful neighbours are short does expansion add candidates,
 from the cached remainder, the center's first grounded query, the original
 query's next raw page, then further grounded queries, up to one per-request
@@ -26,7 +26,6 @@ from app.agents.related_candidates import cached_search, grounded_queries
 from app.agents.related_selector import (
     NewsMapSelector,
     RankedArticle,
-    StoryGroup,
     article_id,
     identity_keys,
 )
@@ -43,8 +42,7 @@ _MAX_START = 1000
 
 @dataclass
 class NewsMapResult:
-    groups: list[StoryGroup]
-    center_group: list[RankedArticle]
+    items: list[RankedArticle]
     status: str
     reason: str | None
     target: int
@@ -186,8 +184,8 @@ async def build_news_map(
     await selector.add(pool[:consumed], limit=settings.news_map_initial_candidates)
     stats["initial"] = selector.evaluated
     stats["rounds"] = 1
-    groups = selector.select(target)
-    status, reason = (COMPLETE, None) if len(groups) >= target else (INSUFFICIENT, None)
+    items = selector.select(target)
+    status, reason = (COMPLETE, None) if len(items) >= target else (INSUFFICIENT, None)
     expansion = _Expansion(center, selector, stats)
     steps = list(expansion.steps(pool, consumed))
     if status == INSUFFICIENT and not expand:
@@ -212,8 +210,8 @@ async def build_news_map(
                     added = await selector.add(articles, limit=settings.news_map_max_candidates - selector.evaluated)
                     stats["rounds"] += 1
                     stats[f"added_{name}"] = stats.get(f"added_{name}", 0) + added
-                    groups = selector.select(target)
-                    if len(groups) >= target:
+                    items = selector.select(target)
+                    if len(items) >= target:
                         status, reason = COMPLETE, None
                         break
                 else:
@@ -227,15 +225,16 @@ async def build_news_map(
             status, reason = PARTIAL, "embedding_failed"
         except DatabasePersistenceError:
             status, reason = PARTIAL, "storage_failed"
-        groups = list(selector.selected)
+        items = list(selector.selected)
     stats.update(
         status=status, reason=reason or "-", target=target, evaluated=selector.evaluated,
-        below_threshold=selector.below_threshold, center_repeats=len(selector.center_group),
-        grouped=sum(len(g.members) for g in selector.groups), withheld=len(selector.withheld),
-        groups=len(selector.groups), selected=len(groups), **usage,
+        below_threshold=selector.below_threshold, entity_only=selector.entity_only, unconnected=selector.unconnected,
+        center_repeats=selector.center_repeats,
+        neighbour_repeats=selector.neighbour_repeats, withheld=selector.withheld,
+        remaining=len(selector.remaining), selected=len(items), **usage,
         elapsed_ms=round((time.monotonic() - started) * 1000),
     )
     # Counts and the hashed article ID only: no titles, queries, keys or vectors.
     logger.info("news_map center=%s %s", article_id(center),
                 " ".join(f"{key}={value}" for key, value in stats.items()))
-    return NewsMapResult(groups, list(selector.center_group), status, reason, target, stats)
+    return NewsMapResult(items, status, reason, target, stats)

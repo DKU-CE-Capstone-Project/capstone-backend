@@ -104,7 +104,7 @@ def searches(monkeypatch, results):
 
 
 def neighbour_ids(result):
-    return [g.representative.article["news_id"] for g in result.groups]
+    return [g.article["news_id"] for g in result.items]
 
 
 async def test_initial_candidates_sufficient_skip_external_search(monkeypatch, oil_map):
@@ -113,9 +113,9 @@ async def test_initial_candidates_sufficient_skip_external_search(monkeypatch, o
     put([cached(repeat(i), 10 + i) for i in range(5)])
     seen = searches(monkeypatch, {})
     result = await news_map.build_news_map(center, target=3)
-    assert result.status == "complete" and len(result.groups) == 3
+    assert result.status == "complete" and len(result.items) == 3
     assert seen == [] and result.stats["searches"] == 0
-    assert {a.article["news_id"] for a in result.center_group} == {f"repeat-{i:02d}" for i in range(5)}
+    assert result.stats["center_repeats"] == 5
 
 
 async def test_initial_pool_full_of_repeats_expands_with_grounded_then_original_next_page(monkeypatch, oil_map):
@@ -125,14 +125,14 @@ async def test_initial_pool_full_of_repeats_expands_with_grounded_then_original_
            angle("airlines"), angle("opec")]
     seen = searches(monkeypatch, {"국제유가": raw, "*": []})
     result = await news_map.build_news_map(center, target=3)
-    assert result.status == "complete" and len(result.groups) == 3
+    assert result.status == "complete" and len(result.items) == 3
     # The center's grounded query runs first; the original relevance search then
     # continues after raw position 20, not page 1 again.
     size = settings.news_map_supplement_page_size
     assert seen[0][0] != "국제유가" and seen[0][1:] == (1, size)
     assert seen[1] == ("국제유가", 21, size)
     assert result.stats["initial"] == 19 and result.stats["search_steps"] == 2
-    assert len(result.center_group) == 20  # Reprints never consume neighbour slots.
+    assert result.stats["center_repeats"] == 20  # Reprints never consume neighbour slots.
     assert result.stats["evaluated"] <= settings.news_map_max_candidates
     # Expansion candidates keep the original session/rank for later pools.
     assert store.news_cache["forecast"]["_searched_at"] == SESSION
@@ -177,7 +177,7 @@ async def test_fifty_unique_cap_counts_only_unique_candidates(monkeypatch, oil_m
     result = await news_map.build_news_map(center, target=3)
     assert result.stats["evaluated"] == 50
     assert result.status == "insufficient" and result.reason == "candidate_limit"
-    assert result.groups == [] and len(result.center_group) == 50
+    assert result.items == [] and result.stats["center_repeats"] == 50
     # Raw positions 21-61: reports 19-29 were already pooled and are not unique candidates.
     assert result.stats["raw"] == 41 and result.stats["raw_duplicates"] == 11
     assert result.stats["added_cached_pool"] == 10 and result.stats["added_original_next"] == 20
@@ -204,7 +204,7 @@ async def test_fifty_evaluated_with_valid_shortage_returns_fewer_nodes(monkeypat
     searches(monkeypatch, {"*": raw})
     result = await news_map.build_news_map(center, target=3)
     assert result.stats["evaluated"] == 50
-    assert neighbour_ids(result) == [] or len(result.groups) < 3
+    assert neighbour_ids(result) == [] or len(result.items) < 3
     assert result.status == "insufficient"
 
 
@@ -219,7 +219,7 @@ async def test_irrelevant_expansion_candidates_never_fill_slots(monkeypatch, oil
     unrelated = [oil(f"house-{i}", f"주택 전세 계약 {i}", "임대차 계약 갱신 사례") for i in range(10)]
     searches(monkeypatch, {"*": unrelated})
     result = await news_map.build_news_map(center, target=3)
-    assert result.groups == [] and result.status == "insufficient"
+    assert result.items == [] and result.status == "insufficient"
     assert result.stats["below_threshold"] >= 10
 
 
@@ -309,7 +309,7 @@ async def test_expand_false_reports_expandable_and_full_request_appends(monkeypa
     initial = await news_map.build_news_map(center, target=3, expand=False)
     assert initial.status == "expandable" and seen == []
     full = await news_map.build_news_map(center, target=3)
-    assert neighbour_ids(full)[:len(initial.groups)] == neighbour_ids(initial)
+    assert neighbour_ids(full)[:len(initial.items)] == neighbour_ids(initial)
     assert full.status == "complete"
 
 
@@ -334,7 +334,7 @@ async def test_legacy_fallback_provider_is_not_used_for_expansion(monkeypatch, o
 
     monkeypatch.setattr(news_fetcher, "fetch_search_page", forbidden)
     result = await news_map.build_news_map(center, target=3)
-    assert result.groups == [] and result.status == "insufficient" and result.reason == "no_source"
+    assert result.items == [] and result.status == "insufficient" and result.reason == "no_source"
 
 
 async def test_expansion_adds_no_generation_body_or_rag_calls(monkeypatch, oil_map, metadata_ai):
@@ -393,7 +393,7 @@ async def test_diagnostic_log_has_counts_without_titles_queries_or_vectors(monke
 
 # ── API contract ────────────────────────────────────────────────────────────
 
-def test_related_graph_share_status_groups_and_tier_policy(monkeypatch, oil_map):
+def test_related_graph_share_status_representatives_and_tier_policy(monkeypatch, oil_map):
     _ = oil_map
     put([cached(repeat(i), i + 2) for i in range(2)])
     searches(monkeypatch, {"*": NaverNewsError("추가 검색 실패", 503)})
@@ -407,8 +407,8 @@ def test_related_graph_share_status_groups_and_tier_policy(monkeypatch, oil_map)
         assert related["selection"] == graph["selection"]
         assert related["selection"]["status"] == "partial" and related["selection"]["reason"] == "search_failed"
         assert related["selection"]["requested"] == (5 if tier == "PAID" else 3)
-        assert related["center_same_story_total"] == 2
-        assert all("relevance_score" not in a for a in related["center_same_story"])
+        assert "center_same_story" not in related and "center_same_story_total" not in related
+        assert all("same_story" not in a for a in graph["nodes"])
         assert (related["related_news"][0]["relevance_score"] is None) == (tier == "FREE")
 
 
@@ -422,9 +422,11 @@ def test_expand_query_and_openapi_contract(monkeypatch, oil_map):
     full = client.get("/api/v1/news/center/related").json()
     assert [a["news_id"] for a in full["related_news"]][:1] == ["forecast"]
     schema = client.get("/openapi.json").json()["components"]["schemas"]
-    assert {"same_story", "same_story_total"} <= set(schema["RelatedNewsItem"]["properties"])
-    assert {"center_same_story", "selection"} <= set(schema["RelatedResponse"]["properties"])
-    assert "relevance_score" not in schema["SameStoryArticle"]["properties"]
+    assert {"same_story", "same_story_total"}.isdisjoint(schema["RelatedNewsItem"]["properties"])
+    assert {"same_story", "same_story_total"}.isdisjoint(schema["GraphNode"]["properties"])
+    assert "selection" in schema["RelatedResponse"]["properties"]
+    assert {"center_same_story", "center_same_story_total"}.isdisjoint(schema["RelatedResponse"]["properties"])
+    assert "SameStoryArticle" not in schema
     assert schema["NewsMapSelection"]["properties"]["status"]["enum"] == ["complete", "insufficient", "partial",
                                                                           "expandable"]
 
@@ -489,7 +491,7 @@ def test_grounded_queries_do_not_invent_angles_or_ungrounded_metadata():
     ("news_map_repeat_short_text_similarity", -1), ("news_map_repeat_max_hours", 0),
     ("news_map_repeat_description_min_chars", 501), ("news_map_repeat_novelty_ratio", -1),
     ("news_map_initial_candidates", 2), ("news_map_initial_candidates", 51), ("news_map_max_candidates", 51),
-    ("news_map_same_story_limit", -1), ("news_map_supplement_max_searches", 6),
+    ("news_map_supplement_max_searches", 6),
     ("news_map_supplement_page_size", 51), ("news_map_supplement_timeout_seconds", 61),
     ("news_map_supplement_cache_ttl_seconds", 0),
 ])

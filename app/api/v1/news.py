@@ -14,7 +14,7 @@ from app.agents.filter_agent import _content_tokens
 from app.agents.graph_builder import _relevance_score, build_graph
 from app.agents.news_fetcher import fetch_naver_news_page, fetch_news
 from app.agents.news_map import NewsMapResult, build_news_map, display_target
-from app.agents.related_selector import RankedArticle, article_id, article_key
+from app.agents.related_selector import article_id
 from app.config import settings
 from app.news_cards import thumbnail as _thumb
 from app.news_cards import to_news_card as _to_news_card
@@ -27,7 +27,6 @@ from app.schemas import (
     RelatedResponse,
     RelationScore,
     RelationsResponse,
-    SameStoryArticle,
     SearchResponse,
     SourceResponse,
     ThumbnailResponse,
@@ -79,17 +78,9 @@ async def _news_map(
         ) from exc
 
 
-def _same_story(items: list[RankedArticle]) -> tuple[list[SameStoryArticle], int]:
-    """Repeats in publication order, capped; cards carry no score in any tier."""
-    ordered = sorted(items, key=lambda item: (item.article.get("published_at") or "", article_key(item.article)))
-    cards = [SameStoryArticle(**_to_news_card(item.article, index).model_dump())
-             for index, item in enumerate(ordered[:settings.news_map_same_story_limit])]
-    return cards, len(items)
-
-
 def _selection(result: NewsMapResult) -> NewsMapSelection:
     return NewsMapSelection(status=result.status, reason=result.reason, requested=result.target,
-                            returned=len(result.groups))
+                            returned=len(result.items))
 
 
 # ── GET /search ───────────────────────────────────────────────────────────────
@@ -197,13 +188,10 @@ async def get_graph(
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
     result = await _news_map(center, limit, min_relevance, tier, expand)
-    related = [group.representative for group in result.groups]
+    related = result.items
     scores = {article_id(item.article): round(item.score, 6) for item in related} if tier_ok(tier, "PAID") else {}
-    same_story = {article_id(group.representative.article): _same_story(group.members) for group in result.groups}
-    same_story[article_id(center)] = _same_story(result.center_group)
     graph = build_graph(
         center, [item.article for item in related], include_distance=include_distance, scores=scores,
-        same_story=same_story,
     )
 
     return GraphResponse(**graph, selection=_selection(result))
@@ -223,8 +211,8 @@ async def get_related(
     """
     연관 뉴스를 반환합니다.
     FREE/BASIC: 최대 3개, relevance_score 미포함. PAID: 요청 limit 적용 + relevance_score 포함.
-    모든 요금제는 같은 관련성 필터·같은 소식 묶음·MMR을 수행합니다. 같은 소식의 다른 보도는
-    주변 기사 수를 소비하지 않고 same_story/center_same_story로 반환되며 점수가 없습니다.
+    모든 요금제는 같은 관련성 필터·반복 정보 제외·MMR을 수행합니다.
+    반복 보도는 표시에서 제외하며 묶음 목록이나 건수를 반환하지 않습니다.
     응답 순서는 다양성 선정 순서이며 점수는 중심과의 연관도입니다.
     """
     center = await store.get_news(news_id)
@@ -235,21 +223,16 @@ async def get_related(
     result = await _news_map(center, limit, min_relevance, tier, expand)
 
     items: list[RelatedNewsItem] = []
-    for i, group in enumerate(result.groups):
-        art, score = group.representative.article, group.representative.score
-        same_story, total = _same_story(group.members)
+    for i, item in enumerate(result.items):
+        art, score = item.article, item.score
         items.append(
             RelatedNewsItem(
                 **_to_news_card(art, i).model_dump(),
                 relevance_score=round(score, 6) if is_paid else None,
                 distance=1,
-                same_story=same_story,
-                same_story_total=total,
             )
         )
-    center_same_story, center_total = _same_story(result.center_group)
-    return RelatedResponse(related_news=items, center_same_story=center_same_story,
-                           center_same_story_total=center_total, selection=_selection(result))
+    return RelatedResponse(related_news=items, selection=_selection(result))
 
 
 # ── POST /selections (PAID) ───────────────────────────────────────────────────

@@ -24,7 +24,7 @@ class Relation(str, Enum):
     REPEAT = "repeat"                       # same event, mostly the same supplied information
     NEW_INFO = "same_event_new_info"        # same event with meaningful added facts or analysis
     DIFFERENT = "different_event"           # related, but another event, time or result
-    INSUFFICIENT = "insufficient_evidence"  # too little supplied text or time to decide
+    INSUFFICIENT = "insufficient_evidence"  # evidence cannot confirm a repeat or added information
 
 
 @dataclass(frozen=True)
@@ -34,8 +34,10 @@ class Judgment:
 
     @property
     def withheld(self) -> bool:
-        """A short candidate that visibly adds nothing, but whose repeat is unconfirmed."""
-        return self.relation is Relation.INSUFFICIENT and self.reason == "short_text_covered"
+        """No confirmed addition, and too little evidence to confirm repetition."""
+        return self.relation is Relation.INSUFFICIENT and self.reason in {
+            "short_text_covered", "low_overlap", "semantic_difference",
+        }
 
 
 # ── text normalization ──────────────────────────────────────────────────────
@@ -219,6 +221,80 @@ _NOT_MODELS = re.compile(r"^(?:q[1-4]|h[12]|[a-z]2[a-z]|snp\d+)$")
 # Attributive/predicate forms ("막는", "나왔다") describe; they are not new subjects.
 _PREDICATE_TOKEN = re.compile(r"(?:는|던|다|며|니|면|려|러|겠|했|았|었|었나|았나|였나|건가|는가|을까|일까|할까|어본|아본)$")
 
+# Whole tokens only: a ministry's trailing syllables must never become a person.
+# These are institution shapes, not a blacklist of individual ministries.
+_ROLES = r"회장|부회장|대통령|총재|부총재|대표|장관|차관|위원장|의장|원장|청장|시장|교수"
+_ORGANIZATION_END = re.compile(
+    r"(?:부|청|처|은행|위원회|공사|공단|협회|연구소|연구원|대학교|대학|정부|국회|법원"
+    r"|시청|도청|군청|구청|그룹|전자|자동차|통신|회사|기업|센터|노조|연맹|의회|재단|병원|진흥원|회의소)$")
+_PERSON = re.compile(
+    rf"(?<![가-힣a-zA-Z0-9])(?P<name>[가-힣]{{2,4}})\s+"
+    rf"(?:(?P<organization>(?:[가-힣a-zA-Z][가-힣a-zA-Z0-9·-]*\s+){{0,2}}"
+    rf"[가-힣a-zA-Z][가-힣a-zA-Z0-9·-]*)\s+)??(?P<role>{_ROLES})"
+    r"(?=$|[^가-힣]|[은는이가의도께과와을를])")
+_INSTITUTION_ALIASES = frozenset(
+    _compact(alias) for name, aliases in _NAMES.items()
+    if name not in {"트럼프", "이란", "사우디", "중국"} for alias in aliases)
+_IDENTITY_CONTEXT = {"정부", "국회", "미국", "한국", "중국", "일본", "영국", "독일", "프랑스",
+                     "각국", "국내", "우리", "산업", "무역", "통상", "경제", "정치권"}
+# A plausible Korean surname AND an explicit role are required. This is a
+# conservative extraction cue, not proof that an arbitrary token is a person.
+_KOREAN_NAME = re.compile(
+    r"^(?:[김이박최정강조윤장임한오서신권황안송전홍유고문양손배백허남심노하곽성차주우구민진지엄채"
+    r"원천방공현변함염여추도소석선설마길표명기반왕옥육]|남궁|황보|제갈|선우|독고)[가-힣]{1,3}$")
+_CLAIM_PREDICATE = re.compile(
+    r"(?:밝혔|말했|설명했|발표했|결정했|의결했|합의했|승인했|철회했|거부했|구성했|신설했"
+    r"|시작했|중단했|확정했|체결했|지급했|완료했)(?:다|다고|으며|고)(?=$|[^가-힣])")
+_REPORTING_WORD = re.compile(r"밝히|밝혔|말했|설명했|발표했|따르|알려|전했|약속|확인")
+# Words identifying publication of an announcement do not describe an additional
+# action/result. This is grounded by the saved public-policy and research replays.
+_ANNOUNCEMENT_WORDS = {"합동", "마련", "마련한", "방안", "내용", "관련", "관계", "최근", "이번",
+                       "기준", "기존", "강화", "결과", "나왔다", "전문", "실질적", "한목소리"}
+_EXPLANATION_LINK = re.compile(r"때문|영향으로|에\s*따라|(?:상승|하락|급등|급락|증가|감소|변화)(?:으)?로")
+
+
+def _is_organization(word: str) -> bool:
+    return bool(_ORGANIZATION_END.search(word)) or _compact(word) in _INSTITUTION_ALIASES
+
+
+def _people(text: str) -> frozenset[str]:
+    found = set()
+    for token in re.finditer(r"[가-힣a-zA-Z0-9]+", text):
+        match = _PERSON.match(text, token.start())
+        if not match:
+            continue
+        name, organization = match.group("name", "organization")
+        # A role supplies person context; any intervening phrase must be an
+        # institution. Ambiguous text is left unextracted, never shortened.
+        if (not _KOREAN_NAME.match(name) or _is_organization(name) or name in _IDENTITY_CONTEXT or name in _STOP
+                or _PREDICATE_TOKEN.search(name) or _re(rf"^(?:{_ROLES})$").match(name)):
+            continue
+        if organization:
+            if not _is_organization(organization):
+                continue
+            if len(organization.split()) > 1 and not (
+                    _compact(organization) in _INSTITUTION_ALIASES or all(
+                        _is_organization(w) or w in _IDENTITY_CONTEXT for w in organization.split())):
+                continue
+        found.add(name)
+    return frozenset(found)
+
+
+def _organizations(text: str) -> frozenset[str]:
+    return frozenset(word for word in re.findall(r"[가-힣a-zA-Z][가-힣a-zA-Z0-9·-]*", text)
+                     if _is_organization(word))
+
+
+def _ambiguous_name_lists(text: str) -> set[str]:
+    """Unattributed name-shaped lists cannot establish novelty or confirmed people."""
+    found = set()
+    for match in re.finditer(r"(?<![가-힣])[가-힣]{2,4}(?:\s*[·,]\s*[가-힣]{2,4})+(?![가-힣])", text):
+        words = re.findall(r"[가-힣]+", match.group())
+        if all(_KOREAN_NAME.match(w) and not _is_organization(w) for w in words):
+            found.update(words)
+    return found
+
+
 _NUM = r"\d+(?:,\d{3})*(?:\.\d+)?"
 _FIGURE = re.compile(
     rf"(?<![\d.,])(?P<num>{_NUM}(?:\s*[조억만천]\s*(?:{_NUM}(?![\d.,]))?)*)\s*"
@@ -367,9 +443,12 @@ class EventEvidence:
     models: frozenset[str]
     model_lines: frozenset[tuple[str, str]]
     names: frozenset[str]
+    people: frozenset[str]
+    organizations: frozenset[str]
     title_stages: frozenset[str]
     title_facets: frozenset[str]
     facets: frozenset[str]
+    description_facets: frozenset[str]
     price_polarity: frozenset[str]
     quantity_polarity: frozenset[str]
     decisions: frozenset[str]
@@ -409,7 +488,8 @@ def event_evidence(article: dict[str, Any]) -> EventEvidence:
     names = {name for name, aliases in _NAMES.items()
              if any(re.search(r"(?<![a-z0-9])" + re.escape(a.casefold()) + r"(?![a-z0-9])", text.casefold())
                     for a in aliases)}
-    names.update(re.findall(r"([가-힣]{2,4})\s+(?:회장|대통령|총재|대표|장관|위원장|의장)", text))
+    people = _people(text)
+    names.update(people)
     descriptions = _dates(description)
     return EventEvidence(
         title=title, description=description, compact=_compact(text), title_tokens=title_words,
@@ -418,8 +498,10 @@ def event_evidence(article: dict[str, Any]) -> EventEvidence:
         title_targets=_targets(title), targets=_targets(text),
         title_subjects=_cues(title, _SUBJECTS), subjects=_cues(text, _SUBJECTS),
         title_models=_models(title), models=_models(text), model_lines=_model_lines(title), names=frozenset(names),
+        people=people, organizations=_organizations(text),
         title_stages=_cues(title, _STAGES),
         title_facets=_cues(_ROUTINE.sub(" ", title), _FACETS), facets=_cues(_ROUTINE.sub(" ", text), _FACETS),
+        description_facets=_cues(_ROUTINE.sub(" ", description), _FACETS),
         price_polarity=_polarity(title, _PRICE_UP, _PRICE_DOWN),
         quantity_polarity=_polarity(title, _QUANTITY_UP, _QUANTITY_DOWN),
         decisions=_cues(title, _DECISIONS),
@@ -450,7 +532,27 @@ def _anchor(a: EventEvidence, b: EventEvidence, title_dice: float) -> bool:
     shared -= {name.casefold() for name in a.names | b.names}
     if _shared_title_figure(a, b) and shared:
         return True
-    return len(shared) >= 2 and title_dice >= 0.3
+    if len(shared) >= 2 and title_dice >= 0.3:
+        return True
+    # Reports of the same announcement often put different parts of its supplied
+    # description in their headlines. Require literal content on both sides;
+    # neither the company nor the cosine alone can establish this anchor.
+    def covered_title(x: EventEvidence, y: EventEvidence) -> int:
+        return sum(w in y.compact for w in _subject_words(x.title_tokens)
+                   if w not in _ANNOUNCEMENT_WORDS and not _is_organization(w)
+                   and w not in {_compact(n) for n in x.names | y.names})
+
+    if covered_title(a, b) >= 2 and covered_title(b, a) >= 2:
+        return True
+    # A substantially shared snippet can identify a release despite editorial
+    # headlines. At least two non-identity content tokens are still required.
+    shared_description = set(tokens(a.description)) & set(tokens(b.description))
+    shared_description = {w for w in _subject_words(list(shared_description))
+                          if w not in _ANNOUNCEMENT_WORDS and not _is_organization(w)}
+    return len(shared_description) >= 2 and min(
+        containment(a.description_bigrams, b.all_bigrams),
+        containment(b.description_bigrams, a.all_bigrams),
+    ) >= settings.news_map_repeat_text_similarity
 
 
 def _direction_conflict(a: EventEvidence, b: EventEvidence) -> bool:
@@ -523,8 +625,64 @@ def _grounded_title_novelty(b: EventEvidence, a: EventEvidence) -> list[str]:
     unless the article's supplied text actually covers it.
     """
     own = frozenset(b.description_bigrams)
-    return [w for w in _uncovered_tokens(b.title_tokens, a)
+    return [w for w in _information_novelty(b.title_tokens, b, a)
             if re.search(r"[a-z0-9]", w) or w in _compact(b.description) or containment(bigrams([w]), own) >= 0.5]
+
+
+def _information_novelty(words: tuple[str, ...] | list[str], b: EventEvidence, a: EventEvidence) -> list[str]:
+    """Entity mentions and titles identify a report; they do not assert an added fact."""
+    identities = {_compact(n) for n in b.people | b.organizations | (b.names - {"이란", "사우디", "중국"})}
+    identities.update(_ambiguous_name_lists(f"{b.title} {b.description}"))
+    return [w for w in _uncovered_tokens(words, a)
+            if _compact(w) not in identities and not _is_organization(w)
+            and not _re(rf"^(?:{_ROLES})$").match(w) and w not in _ANNOUNCEMENT_WORDS]
+
+
+def has_issue_connection(a: EventEvidence, b: EventEvidence, query: str) -> bool:
+    """Reject rich snippets whose only literal connection is a broad topic/identity.
+
+    This conservative gate does not infer a causal link. An explicit explanatory
+    angle about the search topic can remain eligible. Short text keeps the
+    existing insufficient-evidence policy; semantic relevance still precedes it.
+    It is a lexical guard, not a complete judgment of usefulness.
+    """
+    if min(a.description_length, b.description_length) < settings.news_map_repeat_description_min_chars:
+        return True
+    topic = set(tokens(normalize(query)))
+    identities = {_compact(n) for n in a.names | b.names | a.organizations | b.organizations}
+    generic = _ANNOUNCEMENT_WORDS | {
+        "올해", "지난해", "국내", "기업", "정부", "업무", "정보", "부문", "공공", "공공부문",
+        "계열", "의약품", "펩타이드", "glp", "달러", "원", "확대", "발표", "공개", "추진",
+    }
+    shared = set(tokens(f"{a.title} {a.description}")) & set(tokens(f"{b.title} {b.description}"))
+    specific = {w for w in _subject_words(list(shared))
+                if w not in topic | identities | generic and not _is_organization(w)}
+    if specific:
+        return True
+    # The supplied article must itself discuss the topic and an explanatory
+    # facet. Sharing a category/metadata keyword cannot satisfy this condition.
+    shared_topic = (topic and _compact(query) in a.compact and _compact(query) in b.compact) or any(
+        _covered(target, b.targets) for target in a.targets)
+    return bool(shared_topic and (b.description_facets - {"reaction", "policy"}
+                                  or _EXPLANATION_LINK.search(b.description)))
+
+
+def _attributed_addition(b: EventEvidence, a: EventEvidence) -> bool:
+    """A named actor plus a separately stated proposition, never just a new name.
+
+    Only complete supplied description clauses count. Require two uncovered
+    content words besides the identity and reporting verb. This deliberately
+    leaves ambiguous or truncated attributions undecided.
+    """
+    actors = b.people | b.organizations
+    for clause in re.split(r"[.!?。]|(?<=다)\s+", b.description):
+        if not _CLAIM_PREDICATE.search(clause) or not any(actor in clause for actor in actors):
+            continue
+        novel = [w for w in _information_novelty(tokens(clause), b, a)
+                 if w not in _IDENTITY_CONTEXT and not _REPORTING_WORD.search(w)]
+        if len(set(novel)) >= 2 and len(set(novel)) / max(1, len(set(tokens(clause)))) >= settings.news_map_repeat_novelty_ratio:
+            return True
+    return False
 
 
 def _model_covered(model: str, other: EventEvidence, lines: frozenset[tuple[str, str]] = frozenset()) -> bool:
@@ -546,9 +704,11 @@ def _new_items(b: EventEvidence, a: EventEvidence, *, title: bool) -> list[str]:
         items += [f"subject:{s}" for s in b.title_subjects - a.subjects]
     items += [f"model:{m}" for m in (b.title_models if title else b.models)
               if not _model_covered(m, a, b.model_lines)]
-    items += [f"facet:{f}" for f in (b.title_facets if title else b.facets) - a.facets]
-    if not title:
-        items += [f"name:{n}" for n in b.names if _compact(n) not in a.compact]
+    # A headline mentioning an angle (e.g. institutional 'evaluation') must
+    # actually supply it in the description. Headline-only labels are not facts.
+    facets = b.title_facets & b.description_facets if title else b.description_facets
+    items += [f"facet:{f}" for f in facets - a.facets]
+    # Names (people or institutions) are identity evidence, never novelty units.
     return items
 
 
@@ -590,7 +750,7 @@ def compare(a: EventEvidence, b: EventEvidence, cosine: float) -> Judgment:
                 and cosine >= settings.news_map_repeat_cosine:
             # A verbatim reprint (same title and snippet) repeats every visible fact.
             return Judgment(Relation.REPEAT, "identical_text")
-        if _uncovered_tokens(tokens(b.description), a):
+        if _information_novelty(tokens(b.description), b, a):
             return Judgment(Relation.NEW_INFO, "short_text_addition")
         if (gap is not None and cosine >= settings.news_map_repeat_cosine
                 and title_dice >= settings.news_map_repeat_short_text_similarity):
@@ -600,8 +760,11 @@ def compare(a: EventEvidence, b: EventEvidence, cosine: float) -> Judgment:
     covered = containment(b.description_bigrams, a.all_bigrams)
     if len(_new_items(b, a, title=False)) >= 2 and covered < settings.news_map_repeat_text_similarity:
         return Judgment(Relation.NEW_INFO, "description_addition")
+    if _attributed_addition(b, a):
+        return Judgment(Relation.NEW_INFO, "description_addition")
     if cosine < settings.news_map_repeat_cosine:
-        return Judgment(Relation.NEW_INFO, "semantic_difference")
+        # A lower cosine alone confirms neither repetition nor an added fact.
+        return Judgment(Relation.INSUFFICIENT, "semantic_difference")
     if gap is None:
         return Judgment(Relation.INSUFFICIENT, "time_unknown")
     # Every subject word of b's headline already appears in a: a one-directional
@@ -619,11 +782,6 @@ def compare(a: EventEvidence, b: EventEvidence, cosine: float) -> Judgment:
                      or covered >= settings.news_map_repeat_text_similarity
                      or shared >= 2 or title_covered or paraphrase)
     if not supported:
-        return Judgment(Relation.NEW_INFO, "low_overlap")
+        # Failure to confirm a repeat does not establish meaningful new information.
+        return Judgment(Relation.INSUFFICIENT, "low_overlap")
     return Judgment(Relation.REPEAT, "repeated_information")
-
-
-def same_story(a: EventEvidence, b: EventEvidence, cosine: float) -> bool:
-    """Symmetric check used for complete-link group admission."""
-    return (compare(a, b, cosine).relation is Relation.REPEAT
-            or compare(b, a, cosine).relation is Relation.REPEAT)

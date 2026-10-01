@@ -121,8 +121,10 @@ def test_editorial_headline_wording_is_not_new_information_but_reported_facts_ar
                        "환율 급등을 반복해 겪은 가계는 환율이 올라도 소비를 크게 줄이지 않았다는 한은 연구 결과가 "
                        "나왔다. 외환위기 이후 충격에 적응한 결과다.", _search_keyword="환율")
     assert judge(center, rhetoric, 0.96).relation is Relation.REPEAT
-    # The same unsupported wording with a merely high similarity is kept, not merged.
-    assert judge(center, rhetoric, 0.93).relation is Relation.NEW_INFO
+    # Unsupported wording with merely high similarity confirms neither a repeat nor an addition.
+    judgment = judge(center, rhetoric, 0.93)
+    assert judgment == Judgment(Relation.INSUFFICIENT, "low_overlap")
+    assert judgment.withheld
     generations = article("generations", "환율 급등기 소비…MZ세대는 줄이고 X세대는 그대로",
                           "한국은행 연구에서 외환위기를 겪은 X세대는 환율이 올라도 소비를 유지했지만 MZ세대는 "
                           "소비를 줄였다. 자산이 적을수록 차이가 컸다.", _search_keyword="환율")
@@ -290,7 +292,7 @@ def test_dairy_raw_milk_is_not_read_as_crude_oil():
 
 # ── grouping, withholding and MMR ───────────────────────────────────────────
 
-async def test_center_reprints_are_grouped_without_occupying_slots_and_new_angles_survive(identical_vectors):
+async def test_center_reprints_are_excluded_without_occupying_slots_and_new_angles_survive(identical_vectors):
     center = release("center")
     repeats = [release("copy-a"), release("copy-b")]
     repeats[0]["title"] = "갤럭시 S26 선보인 삼성전자, 신제품 발표"
@@ -302,50 +304,51 @@ async def test_center_reprints_are_grouped_without_occupying_slots_and_new_angle
     ]
     selector = NewsMapSelector(center)
     await selector.add([*repeats, *novel])
-    assert {g.representative.article["news_id"] for g in selector.select(3)} == {"comparison", "reaction", "impact"}
-    assert {item.article["news_id"] for item in selector.center_group} == {"copy-a", "copy-b"}
+    assert {g.article["news_id"] for g in selector.select(3)} == {"comparison", "reaction", "impact"}
+    assert selector.center_repeats == 2
 
 
-async def test_exact_copy_from_another_url_is_a_separate_candidate_that_joins_the_center_group(identical_vectors):
+async def test_exact_copy_from_another_url_is_evaluated_and_excluded(identical_vectors):
     center = release("center")
     copy = {**center, "news_id": "copy", "url": "https://other-outlet.test/copy", "source": "other"}
     selector = NewsMapSelector(center)
     assert await selector.add([copy]) == 1  # Not an identity duplicate: different URL.
-    assert [item.article["news_id"] for item in selector.center_group] == ["copy"]
+    assert selector.center_repeats == 1
     assert selector.select(3) == []
 
 
-async def test_candidate_reprints_have_one_deterministic_representative_and_group(identical_vectors):
+async def test_candidate_reprints_have_one_deterministic_representative(identical_vectors):
     center = release("center")
     a = release("a", "S27")
     b = release("b", "S27")
     b["title"] = "삼성전자 갤럭시 S27 선보여…신제품 공개"
     b["description"] = a["description"].replace("공개했다", "선보였다")
-    c = article("c", "삼성전자 HBM4 양산", "삼성전자가 HBM4 생산을 확대했다. 반도체 공장에서 양산에 나섰다.")
+    c = article("c", "갤럭시 부품 공급 확대", "갤럭시 부품 공급 업체가 배터리 생산을 확대했다. 공장에서 양산에 나섰다.")
     results = []
     for order in permutations([a, b, c]):
         selector = NewsMapSelector(center)
         await selector.add(list(order))
         groups = selector.select(6)
-        results.append([(g.representative.article["news_id"], [m.article["news_id"] for m in g.members])
-                        for g in groups])
+        results.append(ids(groups))
+        assert selector.neighbour_repeats == 1
     assert all(result == results[0] for result in results)
-    assert sorted(len(members) for _, members in results[0]) == [0, 1]
-    assert {results[0][0][0], *results[0][0][1]} in ({"a", "b"}, {"c"})
+    assert len(results[0]) == 2
+    assert len(set(results[0]) & {"a", "b"}) == 1 and "c" in results[0]
 
 
-async def test_withheld_short_copy_is_neither_neighbour_nor_group_member(identical_vectors):
+
+async def test_withheld_short_copy_is_not_a_neighbour(identical_vectors):
     center = release("center", description="")
     copy = release("copy", description="신제품 공개")
     selector = NewsMapSelector(center)
     await selector.add([copy])
-    assert selector.select(3) == [] and selector.center_group == []
-    assert ids(selector.withheld) == ["copy"]
+    assert selector.select(3) == [] and selector.center_repeats == 0
+    assert selector.withheld == 1
     copy["published_at"] = ""  # Unknown time cannot even suggest the same event.
     assert ids(await select_related(center, [copy], limit=3)) == ["copy"]
 
 
-async def test_complete_link_prevents_chain_merging(monkeypatch):
+async def test_selected_bridge_directly_excludes_both_copies(monkeypatch):
     center = release("center")
     candidates = [release(nid, "S27") for nid in ("a", "b", "c")]
     for a in candidates:
@@ -358,7 +361,7 @@ async def test_complete_link_prevents_chain_merging(monkeypatch):
 
     monkeypatch.setattr(llm, "embed", embed)
     result = await select_related(center, candidates, limit=6)
-    assert len(result) == 2  # A~B, B~C, A!~C must not become one connected component.
+    assert len(result) == 1  # B remains visible and directly covers both A and C.
     assert ids(result)[0] == "b"
 
 
@@ -386,7 +389,7 @@ async def test_mmr_order_can_differ_from_relevance_and_cannot_include_unrelated(
 
 async def test_later_rounds_append_without_replacing_selected_neighbours(monkeypatch):
     center = release("center")
-    early = article("early", "삼성전자 HBM4 양산", "삼성전자가 HBM4 생산을 확대했다. 반도체 공장에서 양산에 나섰다.")
+    early = article("early", "갤럭시 부품 공급 확대", "갤럭시 부품 공급 업체가 배터리 생산을 확대했다. 공장에서 양산에 나섰다.")
     better = article("better", "갤럭시 S26 소비자 반응", "9월 30일 신제품 공개 이후 갤럭시 S26 소비자 반응을 조사했다.")
     vectors = {center["title"]: vec(), early["title"]: vec(.9), better["title"]: vec(.99)}
 
@@ -396,14 +399,14 @@ async def test_later_rounds_append_without_replacing_selected_neighbours(monkeyp
     monkeypatch.setattr(llm, "embed", embed)
     selector = NewsMapSelector(center)
     await selector.add([early])
-    assert ids(g.representative for g in selector.select(2)) == ["early"]
+    assert ids(selector.select(2)) == ["early"]
     await selector.add([better])
-    assert ids(g.representative for g in selector.select(2)) == ["early", "better"]
+    assert ids(selector.select(2)) == ["early", "better"]
 
 
 async def test_stored_vectors_reused_for_center_pairs_and_mmr(monkeypatch):
     center = release("center")
-    candidates = [release("a", "S27"), release("b", "S27"), article("c", "삼성전자 HBM4 양산")]
+    candidates = [release("a", "S27"), release("b", "S27"), article("c", "갤럭시 부품 공급 확대")]
     for a in [center, *candidates]:
         _, metadata = article_embeddings._input(a, "news_map")
         a["news_map_embedding"] = {"metadata": metadata, "values": vec()}
@@ -417,7 +420,7 @@ async def test_stored_vectors_reused_for_center_pairs_and_mmr(monkeypatch):
 
 
 @pytest.mark.parametrize("tier,limit", [("FREE", 6), ("BASIC", 2), ("PAID", 5)])
-def test_apis_match_grouping_order_policy_and_hide_scores_in_groups(monkeypatch, identical_vectors, tier, limit):
+def test_apis_match_representatives_order_policy_and_remove_group_fields(monkeypatch, identical_vectors, tier, limit):
     center = release("center")
     candidates = [{**release("copy"), "url": "https://other.test/copy"}, release("a", "S27"), release("b", "S27"),
                   article("reaction", "삼성전자 갤럭시 S26 소비자 반응", "신제품을 평가한 소비자 반응이다.",
@@ -433,14 +436,11 @@ def test_apis_match_grouping_order_policy_and_hide_scores_in_groups(monkeypatch,
     assert len(related) == 2
     assert [a["news_id"] for a in related] == [a["news_id"] for a in graph["nodes"][1:]]
     assert all(a["news_id"] != "copy" and (a["relevance_score"] is not None) == (tier == "PAID") for a in related)
-    # The repeat is reachable as a card in the center group, never as a scored neighbour.
-    assert [a["news_id"] for a in body["center_same_story"]] == ["copy"] and body["center_same_story_total"] == 1
-    assert graph["center_node"]["same_story"] == body["center_same_story"]
-    model_group = next(a for a in related if a["news_id"] in {"a", "b"})
-    assert model_group["same_story_total"] == 1 and len(model_group["same_story"]) == 1
-    for card in [*body["center_same_story"], *model_group["same_story"]]:
-        assert "relevance_score" not in card and "distance" not in card
+    assert "center_same_story" not in body and "center_same_story_total" not in body
+    for card in [*related, *graph["nodes"], graph["center_node"]]:
+        assert "same_story" not in card and "same_story_total" not in card
         assert card["source_url"] and card["title"] and card["source_name"]
+    assert "copy" in store.news_cache  # Exclusion never deletes stored articles.
     assert body["selection"] == graph["selection"]
     assert body["selection"]["requested"] == (limit if tier == "PAID" else min(limit, 3))
     assert body["selection"]["returned"] == 2

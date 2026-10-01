@@ -83,7 +83,7 @@ async def test_changing_center_recalculates_ranking(corpus):
     assert ids(result) == ["a-low"]
 
 
-async def test_only_id_and_url_are_identity_duplicates_and_exact_copies_are_grouped(corpus):
+async def test_only_id_and_url_are_identity_duplicates_and_exact_copies_are_excluded(corpus):
     articles, _ = corpus
     for a in articles:
         a["published_at"] = "2026-09-30T09:00:00Z"
@@ -93,10 +93,9 @@ async def test_only_id_and_url_are_identity_duplicates_and_exact_copies_are_grou
     # The center and its tracking-URL alias are identity duplicates; another outlet's copy is not.
     assert await selector.add([*articles, duplicate, same_url]) == 5
     groups = selector.select(20)
-    assert len(groups) == 2 and groups[1].representative.article["news_id"] == "b-mid"
-    # Equal relevance ties use the fixed article key; the other copy is a group member.
-    story = {groups[0].representative.article["news_id"], *(m.article["news_id"] for m in groups[0].members)}
-    assert story == {"z-high", "dup"} and len(groups[0].members) == 1
+    assert len(groups) == 2 and groups[1].article["news_id"] == "b-mid"
+    assert groups[0].article["news_id"] == "dup" and selector.neighbour_repeats == 1
+
 
 
 async def test_different_description_same_title_is_not_a_duplicate(monkeypatch):
@@ -165,9 +164,12 @@ async def test_entity_only_overlap_does_not_gain_keyword_bonus(monkeypatch):
     center = article("center", "엔비디아 GPU 출시", "AI 제품 생산")
     other = article("other", "Nvidia 사옥 이전", "직원 이사", keywords=["Nvidia"] * 10)
     result = await select_related(center, [other], limit=6)
-    assert result[0].score == pytest.approx(0.8)
+    assert result == []
+    selector = NewsMapSelector(center)
+    assert selector._relevance(other, 1.0) == pytest.approx(0.8)  # Formula unchanged.
     other["keywords"] = []
-    assert (await select_related(center, [other], limit=6))[0].score == result[0].score
+    assert selector._relevance(other, 1.0) == pytest.approx(0.8)
+    assert await select_related(center, [other], limit=6) == []
 
 
 @pytest.mark.parametrize("failed", [[], [float("nan")] * 768, [1.0], [0.0] * 768, "exception"])

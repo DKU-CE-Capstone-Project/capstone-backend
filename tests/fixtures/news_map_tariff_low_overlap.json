@@ -1,0 +1,49 @@
+{
+  "provenance": {
+    "snapshot": ".local/newsmap-eval-20261001/heldout-snapshot.json",
+    "taken_at": "2026-10-01T09:49:24.774685+00:00",
+    "diagnosis": ".local/newsmap-review-20261001-v2/tariff-pair-diagnosis.json",
+    "vectors": "Tests construct mock unit vectors with the diagnosed cosine; no saved vectors or API calls."
+  },
+  "cosine": 0.9374472363205244,
+  "center": {
+    "title": "산업장관 \"대미투자, 관세 압박 관리 차원…15% 상한선 재확인\"",
+    "url": "https://www.yna.co.kr/view/AKR20260923159400003?input=1195m",
+    "naver_url": "https://n.news.naver.com/mnews/article/001/0016348752?sid=101",
+    "source": "yna.co.kr",
+    "published_at": "2026-09-30T21:09:00Z",
+    "description": "미국 '과잉생산 관세' 추가 부과 시 15% 초과 우려 일축 \"대미 통상 관계, 고비 계속 넘는 과정\"…반도체 추가 투자는 논의서 빠져 신창용 장보인 기자 = 도널드 트럼프 미국 행정부의 추가 관세 발표가 임박한 가운데 통상...",
+    "_search_rank": 1,
+    "_search_keyword": "관세",
+    "_search_end": 20,
+    "_searched_at": "2026-10-01T09:49:58.926262+00:00",
+    "news_id": "620bddf7ffd2",
+    "keywords": [
+      "관세",
+      "반도체"
+    ],
+    "categories": [
+      "거시경제",
+      "반도체"
+    ]
+  },
+  "candidate": {
+    "title": "산업장관 \"아쉽게 빠졌지만...美, 어떤 형태든 관세 15% 유지 입장 밝혔...",
+    "url": "http://www.wowtv.co.kr/NewsCenter/News/Read?articleId=A202610010017&t=NN",
+    "naver_url": "https://n.news.naver.com/mnews/article/215/0001267796?sid=101",
+    "source": "wowtv.co.kr",
+    "published_at": "2026-09-30T22:04:00Z",
+    "description": "도널드 트럼프 미국 행정부의 추가 관세 발표가 임박한 가운데 정부가 미국 측으로부터 한국산 제품에 대한 관세율을 기존 합의선인 15% 이내로 유지하겠다는 입장을 확인했다. 1일 통상 당국에 따르면 김정관...",
+    "_search_rank": 10,
+    "_search_keyword": "관세",
+    "_search_end": 20,
+    "_searched_at": "2026-10-01T09:49:58.926262+00:00",
+    "news_id": "536fbdf16226",
+    "keywords": [
+      "관세"
+    ],
+    "categories": [
+      "거시경제"
+    ]
+  }
+}

@@ -1,15 +1,15 @@
-"""Relevance gate, grounded same-story grouping, then deterministic MMR.
+"""Relevance gate, direct repetition exclusion and deterministic MMR.
 
-Selection is incremental: a later candidate round may add groups, add members
-to existing groups and continue MMR, but never reorders or replaces neighbours
-that an earlier round already selected.
+Only the center and selected neighbours can exclude a candidate. Discarded or
+unselected articles never act as comparison anchors. Later rounds append to
+the displayed selection without replacing earlier neighbours.
 """
 from __future__ import annotations
 
 import asyncio
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -26,7 +26,7 @@ from app.agents.repeated_coverage import (
     Relation,
     compare,
     event_evidence,
-    same_story,
+    has_issue_connection,
 )
 from app.config import settings
 from app.utils import make_news_id
@@ -122,23 +122,19 @@ class RankedArticle:
     cosine: float
 
 
-@dataclass
-class StoryGroup:
-    """A neighbour and the other outlets' reports that repeat its information."""
-    representative: RankedArticle
-    members: list[RankedArticle] = field(default_factory=list)
-
-
 class NewsMapSelector:
     def __init__(self, center: dict[str, Any], *, min_relevance: float = 0.0):
         self.center = center
         self.threshold = max(settings.news_map_min_relevance, min_relevance)
-        self.center_group: list[RankedArticle] = []   # Repeats of the center itself.
-        self.groups: list[StoryGroup] = []
-        self.selected: list[StoryGroup] = []
-        self.withheld: list[RankedArticle] = []       # Too short to confirm, adds nothing visible.
+        self.remaining: list[RankedArticle] = []
+        self.selected: list[RankedArticle] = []
+        self.center_repeats = 0
+        self.neighbour_repeats = 0
+        self.withheld = 0  # Unconfirmed repeat, no confirmed addition.
         self.evaluated = 0
         self.below_threshold = 0
+        self.entity_only = 0
+        self.unconnected = 0
         self._seen = identity_keys(center)
         self._center_vector: list[float] | None = None
         self._center_tokens = keyword_tokens(center)
@@ -187,6 +183,12 @@ class NewsMapSelector:
             if score < self.threshold:
                 self.below_threshold += 1
                 continue
+            # The existing cosine/keyword score is unchanged. A registered
+            # company alone is still not evidence of a connection to this issue.
+            shared = self._center_tokens & keyword_tokens(article)
+            if shared and shared <= {word.casefold() for word in ENTITIES}:
+                self.entity_only += 1
+                continue
             ranked.append(RankedArticle(article, score, cosine))
         ranked.sort(key=lambda item: (-item.score, -len(clean_text(item.article.get("description"))),
                                       article_key(item.article)))
@@ -224,41 +226,53 @@ class NewsMapSelector:
         # Every candidate is judged directly against the center first.
         judgment = compare(self._center_evidence, evidence, item.cosine)
         if judgment.relation is Relation.REPEAT:
-            self.center_group.append(item)
+            self.center_repeats += 1
             return
         if judgment.withheld:
-            self.withheld.append(item)
+            self.withheld += 1
             return
-        for group in self.groups:
-            representative = group.representative
+        if not has_issue_connection(self._center_evidence, evidence, self.center.get("_search_keyword") or ""):
+            self.unconnected += 1
+            return
+        self.remaining.append(item)
+
+    def _excluded_by_selection(self, item: RankedArticle) -> bool:
+        """Compare only with articles that will remain visible, never discarded copies."""
+        evidence = self._evidence_of(item)
+        for representative in self.selected:
             judgment = compare(self._evidence_of(representative), evidence, self.similarity(representative, item))
+            if judgment.relation is Relation.REPEAT:
+                self.neighbour_repeats += 1
+                return True
             if judgment.withheld:
-                self.withheld.append(item)
-                return
-            # Complete-link admission: A~B and B~C alone cannot merge A and C.
-            if judgment.relation is Relation.REPEAT and all(
-                    same_story(self._evidence_of(member), evidence, self.similarity(member, item))
-                    for member in group.members):
-                group.members.append(item)
-                return
-        self.groups.append(StoryGroup(item))
+                self.withheld += 1
+                return True
+        return False
 
-    def select(self, limit: int) -> list[StoryGroup]:
-        """Continue MMR over group representatives up to ``limit`` neighbours."""
+    def select(self, limit: int) -> list[RankedArticle]:
+        """Continue MMR, verifying repetition before every additional visible node.
+
+        MMR keeps its existing score and weight. Ties use center relevance,
+        description completeness and the fixed article key. Each round retains
+        previously displayed representatives, even if a later copy scores higher.
+        """
         weight = settings.news_map_mmr_lambda
-        remaining = [group for group in self.groups if not any(group is s for s in self.selected)]
 
-        def priority(group: StoryGroup):
-            item = group.representative
-            redundancy = [self.similarity(item, s.representative) for s in self.selected]
+        def priority(item: RankedArticle):
+            redundancy = [self.similarity(item, s) for s in self.selected]
             value = weight * item.score - (1 - weight) * max(redundancy) if redundancy else item.score
             return (-round(value, 12), -item.score, -len(clean_text(item.article.get("description"))),
                     article_key(item.article))
 
-        while remaining and len(self.selected) < limit:
-            best = min(remaining, key=priority)
+        while self.remaining:
+            # Run even when the target has been reached: final selected nodes
+            # exclude their copies consistently in diagnostics and later rounds.
+            self.remaining = [item for item in self.remaining if not self._excluded_by_selection(item)]
+            if not self.remaining or len(self.selected) >= limit:
+                break
+            best = min(self.remaining, key=priority)
             self.selected.append(best)
-            remaining.remove(best)
+            self.remaining.remove(best)
         return list(self.selected)
 
 
@@ -266,11 +280,11 @@ async def select_related(
     center: dict[str, Any], candidates: list[dict[str, Any]], *, limit: int,
     min_relevance: float = 0.0,
 ) -> list[RankedArticle]:
-    """One-round selection of neighbour representatives (repeats grouped away)."""
+    """One-round selection of useful neighbours, with repeated information excluded."""
     if limit <= 0:
         return []
     selector = NewsMapSelector(center, min_relevance=min_relevance)
     if not unique_candidates(center, candidates):
         return []
     await selector.add(candidates)
-    return [group.representative for group in selector.select(limit)]
+    return selector.select(limit)
