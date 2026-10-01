@@ -1,37 +1,33 @@
 """All /api/v1/news/* endpoints."""
 from __future__ import annotations
 
-import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app import database, store
+from app import store
 from app.agents import naver_categories
 from app.agents.article_embeddings import EmbeddingUnavailable
 from app.agents.filter_agent import _content_tokens
 from app.agents.graph_builder import _relevance_score, build_graph
 from app.agents.news_fetcher import fetch_naver_news_page, fetch_news
-from app.agents.related_candidates import grounded_queries, supplemental_search
-from app.agents.related_selector import (
-    article_id,
-    identity_keys,
-    select_related,
-    unique_candidates,
-)
+from app.agents.news_map import NewsMapResult, build_news_map, display_target
+from app.agents.related_selector import RankedArticle, article_id, article_key
 from app.config import settings
 from app.news_cards import thumbnail as _thumb
 from app.news_cards import to_news_card as _to_news_card
 from app.schemas import (
     GraphResponse,
+    NewsMapSelection,
     NewsSelectionRequest,
     NewsSelectionResponse,
     RelatedNewsItem,
     RelatedResponse,
     RelationScore,
     RelationsResponse,
+    SameStoryArticle,
     SearchResponse,
     SourceResponse,
     ThumbnailResponse,
@@ -44,92 +40,56 @@ router = APIRouter()
 
 async def _fetch_and_cache(keyword: str) -> list[dict[str, Any]]:
     """Fetch news list results and cache them without dropping source thumbnails."""
+    fetched = await fetch_news(keyword, page_size=20)
+    now = datetime.now(UTC).isoformat()
     raw_articles = [
-        {**article, "_search_keyword": keyword}
-        for article in await fetch_news(keyword, page_size=20)
+        {**article, "_search_keyword": keyword, "_search_rank": rank, "_search_end": len(fetched),
+         "_searched_at": now}
+        for rank, article in enumerate(fetched, 1)
     ]
     return await cache_articles(raw_articles)
 
 
 async def _naver_search_response(keyword: str, page: int, size: int, sort: str) -> SearchResponse:
     result = await fetch_naver_news_page(keyword, page=page, size=size, sort=sort)
-    articles = await cache_articles([{**a, "_search_keyword": keyword} for a in result.articles])
+    # Raw rank/end let the news map continue this exact search without gaps or repeats.
+    session = {"_search_keyword": keyword, "_search_end": result.end, "_searched_at": datetime.now(UTC).isoformat()}
+    found = result.articles
+    if sort != "relevance":
+        # Map continuation follows relevance order only; latest-order positions are not ranks.
+        session.pop("_search_end")
+        found = [{k: v for k, v in a.items() if k != "_search_rank"} for a in found]
+    articles = await cache_articles([{**a, **session} for a in found])
     return SearchResponse(news_cards=[_to_news_card(a, i) for i, a in enumerate(articles)],
                           total_count=result.total)
 
 
-async def _related_articles(news_id: str) -> list[dict[str, Any]]:
-    """
-    Collect candidates, independently of the final display/tier limit.
-
-    Collect original-search memory/MongoDB candidates without an external request.
-    Supplemental collection is decided after relevance/repeat filtering.
-    """
-    center = await store.get_news(news_id)
-    if not center:
-        raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found. Search first.")
-
-    original_keyword = center.get("_search_keyword", "")
-    cap = settings.news_map_candidate_limit
-    # Candidate budget is independent of FREE/PAID and the requested display limit.
-    same_search = {
-        article_id(art): art for nid, art in store.news_cache.items()
-        if original_keyword and nid != news_id and art.get("_search_keyword") == original_keyword
-    }
-    for art in await database.news_candidates(original_keyword, cap + 1):
-        if article_id(art) != news_id:
-            same_search.setdefault(article_id(art), art)
-    return [same_search[nid] for nid in sorted(same_search)[:cap]]
-
-
-async def _selected_related(
-    center: dict[str, Any], limit: int, min_relevance: float = 0.0, tier: str = "FREE",
-):
-    limit = limit if tier_ok(tier, "PAID") else min(limit, 3)
-    candidates = await _related_articles(article_id(center))
+async def _news_map(
+    center: dict[str, Any], limit: int, min_relevance: float = 0.0, tier: str = "FREE", expand: bool = True,
+) -> NewsMapResult:
+    """/related and /graph share one selection, tier policy and failure contract."""
     try:
-        selected = await select_related(center, candidates, limit=limit, min_relevance=min_relevance)
-        if (len(selected) >= limit or not settings.news_map_supplement_max_searches
-                or not settings.news_map_supplement_candidate_limit):
-            return selected
-        # The legacy GDELT/NewsAPI path permits silent sample/empty fallbacks.
-        # Only the strict NAVER path (or explicitly configured mock fixtures)
-        # may supply extra candidates; the search endpoint's contract is unchanged.
-        if settings.news_provider != "naver" and not settings.mock_news_active:
-            return selected
-        extra_count = 0
-        seen = set().union(identity_keys(center), *(identity_keys(a) for a in candidates))
-        async with asyncio.timeout(settings.news_map_supplement_timeout_seconds):
-            for query in grounded_queries(center)[:settings.news_map_supplement_max_searches]:
-                raw = await supplemental_search(query, fetch_news)
-                fresh = []
-                for art in unique_candidates(center, raw):
-                    keys = identity_keys(art)
-                    if keys & seen:
-                        continue
-                    seen.update(keys)
-                    fresh.append(art)
-                    if extra_count + len(fresh) >= settings.news_map_supplement_candidate_limit:
-                        break
-                if fresh:
-                    # Preserve any earlier search membership on previously cached articles.
-                    enriched = await cache_articles([
-                        {**a, "_search_keyword": store.news_cache.get(article_id(a), {}).get("_search_keyword") or query}
-                        for a in fresh
-                    ], news_map_only=True)
-                    candidates.extend(enriched)
-                    extra_count += len(enriched)
-                    selected = await select_related(center, candidates, limit=limit, min_relevance=min_relevance)
-                if len(selected) >= limit or extra_count >= settings.news_map_supplement_candidate_limit:
-                    break
-        return selected
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="연관 기사 추가 수집·선정 시간이 초과되었습니다.") from exc
+        return await build_news_map(center, target=display_target(limit, tier), min_relevance=min_relevance,
+                                    expand=expand)
     except EmbeddingUnavailable as exc:
+        # Without a complete first round there is no valid result to return.
         raise HTTPException(
             status_code=503,
             detail="연관 기사 임베딩을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.",
         ) from exc
+
+
+def _same_story(items: list[RankedArticle]) -> tuple[list[SameStoryArticle], int]:
+    """Repeats in publication order, capped; cards carry no score in any tier."""
+    ordered = sorted(items, key=lambda item: (item.article.get("published_at") or "", article_key(item.article)))
+    cards = [SameStoryArticle(**_to_news_card(item.article, index).model_dump())
+             for index, item in enumerate(ordered[:settings.news_map_same_story_limit])]
+    return cards, len(items)
+
+
+def _selection(result: NewsMapResult) -> NewsMapSelection:
+    return NewsMapSelection(status=result.status, reason=result.reason, requested=result.target,
+                            returned=len(result.groups))
 
 
 # ── GET /search ───────────────────────────────────────────────────────────────
@@ -229,19 +189,24 @@ async def get_graph(
     min_relevance: float = Query(default=0.0, ge=0.0, le=1.0),
     include_score: bool = Query(default=False),
     tier: str = Query(default="FREE", pattern="^(FREE|BASIC|PAID)$"),
+    expand: bool = Query(default=True, description="false면 최초 후보만 평가하고 확장 가능 여부를 반환"),
 ) -> GraphResponse:
     """마인드맵 데이터를 반환합니다."""
     center = await store.get_news(news_id)
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
-    related = await _selected_related(center, limit, min_relevance, tier)
+    result = await _news_map(center, limit, min_relevance, tier, expand)
+    related = [group.representative for group in result.groups]
     scores = {article_id(item.article): round(item.score, 6) for item in related} if tier_ok(tier, "PAID") else {}
+    same_story = {article_id(group.representative.article): _same_story(group.members) for group in result.groups}
+    same_story[article_id(center)] = _same_story(result.center_group)
     graph = build_graph(
         center, [item.article for item in related], include_distance=include_distance, scores=scores,
+        same_story=same_story,
     )
 
-    return GraphResponse(**graph)
+    return GraphResponse(**graph, selection=_selection(result))
 
 
 # ── GET /{news_id}/related ────────────────────────────────────────────────────
@@ -253,12 +218,13 @@ async def get_related(
     min_relevance: float = Query(default=0.0, ge=0.0, le=1.0),
     include_score: bool = Query(default=False),
     tier: str = Query(default="FREE", pattern="^(FREE|BASIC|PAID)$"),
+    expand: bool = Query(default=True, description="false면 최초 후보만 평가하고 확장 가능 여부를 반환"),
 ) -> RelatedResponse:
     """
     연관 뉴스를 반환합니다.
-    FREE: 최대 3개, relevance_score 미포함.
-    PAID: 요청 limit 적용 + relevance_score 포함.
-    모든 요금제는 같은 관련성·반복 보도 필터와 MMR을 수행합니다.
+    FREE/BASIC: 최대 3개, relevance_score 미포함. PAID: 요청 limit 적용 + relevance_score 포함.
+    모든 요금제는 같은 관련성 필터·같은 소식 묶음·MMR을 수행합니다. 같은 소식의 다른 보도는
+    주변 기사 수를 소비하지 않고 same_story/center_same_story로 반환되며 점수가 없습니다.
     응답 순서는 다양성 선정 순서이며 점수는 중심과의 연관도입니다.
     """
     center = await store.get_news(news_id)
@@ -266,20 +232,24 @@ async def get_related(
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
     is_paid = tier_ok(tier, "PAID")
-    related = await _selected_related(center, limit, min_relevance, tier)
+    result = await _news_map(center, limit, min_relevance, tier, expand)
 
     items: list[RelatedNewsItem] = []
-    for i, ranked in enumerate(related):
-        art, score = ranked.article, ranked.score
+    for i, group in enumerate(result.groups):
+        art, score = group.representative.article, group.representative.score
+        same_story, total = _same_story(group.members)
         items.append(
             RelatedNewsItem(
                 **_to_news_card(art, i).model_dump(),
                 relevance_score=round(score, 6) if is_paid else None,
                 distance=1,
+                same_story=same_story,
+                same_story_total=total,
             )
         )
-
-    return RelatedResponse(related_news=items)
+    center_same_story, center_total = _same_story(result.center_group)
+    return RelatedResponse(related_news=items, center_same_story=center_same_story,
+                           center_same_story_total=center_total, selection=_selection(result))
 
 
 # ── POST /selections (PAID) ───────────────────────────────────────────────────

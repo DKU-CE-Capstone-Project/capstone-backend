@@ -138,6 +138,10 @@ def news_doc_from_article(art: dict[str, Any]) -> dict[str, Any]:
         doc["thumbnail_url"] = art["thumbnail_url"]
     if art.get("_search_keyword"):
         doc["_search_keyword"] = art["_search_keyword"]
+        # Search-session membership keeps the original rank order after a restart.
+        for key in ("_search_rank", "_search_end", "_searched_at"):
+            if art.get(key):
+                doc[key] = art[key]
     # Preserve extraction inputs/provenance so Mongo reloads can reuse valid results.
     for key in ("description", "title_original", "metadata_extraction", "_news_provider", "naver_url", "naver_categories", "content_source_url", "embedding", "embedding_metadata", "news_map_embedding"):
         if key in art:
@@ -173,6 +177,7 @@ def article_from_news_doc(doc: dict[str, Any]) -> dict[str, Any]:
         "thumbnail_url": doc.get("thumbnail_url", ""),
         "cleaned_content": doc.get("content", ""),
         "_search_keyword": doc.get("_search_keyword", ""),
+        **{key: doc[key] for key in ("_search_rank", "_search_end", "_searched_at") if doc.get(key)},
         "title_original": doc.get("title_original", doc.get("title", "")),
         "keywords": list(doc.get("keywords") or []),
         "categories": list(doc.get("categories") or []),
@@ -401,12 +406,16 @@ async def save_news_embedding(news_id: str, purpose: str, record: dict[str, Any]
 
 
 async def news_candidates(keyword: str, limit: int) -> list[dict[str, Any]]:
-    """Bounded same-search candidate pool, including after an API process restart."""
+    """Bounded same-search pool in search order (latest session, raw rank), after a restart too."""
     db = _get_db()
     if db is None or not keyword:
         return []
     try:
-        cursor = db[NEWS].find({"_search_keyword": keyword, "is_deleted": {"$ne": True}}).sort("news_id", 1).limit(limit)
+        order = [("_searched_at", -1), ("_search_rank", 1), ("published_at", -1), ("news_id", 1)]
+        # Map selection needs card fields and map vectors, not bodies or RAG vectors.
+        projection = {"content": 0, "embedding": 0, "embedding_metadata": 0}
+        cursor = db[NEWS].find({"_search_keyword": keyword, "is_deleted": {"$ne": True}}, projection)
+        cursor = cursor.sort(order).limit(limit)
         return [article_from_news_doc(doc) async for doc in cursor]
     except Exception as exc:
         if settings.mongodb_required:

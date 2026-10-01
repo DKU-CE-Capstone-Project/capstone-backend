@@ -185,10 +185,8 @@ async def _fetch_newsapi(keyword: str, page_size: int) -> list[dict[str, Any]]:
         return []
 
 
-async def fetch_naver_news_page(keyword: str, *, page: int = 1, size: int = 20,
-                                sort: str = "relevance") -> NaverNewsPage:
-    """Search descriptions and page metadata only. Diffbot is deferred to report creation."""
-    result = await fetch_naver_page(keyword, page=page, size=size, sort=sort)
+async def inspect_naver_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only verified non-politics/society NAVER articles, with their page image."""
     semaphore = asyncio.Semaphore(3)
 
     async def inspect(article):
@@ -200,9 +198,39 @@ async def fetch_naver_news_page(keyword: str, *, page: int = 1, size: int = 20,
             return {**article, "naver_categories": labels,
                     "thumbnail_url": image if is_article_image_url(image) else ""}
 
-    checked = await asyncio.gather(*(inspect(article) for article in result.articles))
-    result.articles = [article for article in checked if article is not None]
+    checked = await asyncio.gather(*(inspect(article) for article in articles))
+    return [article for article in checked if article is not None]
+
+
+async def fetch_naver_news_page(keyword: str, *, page: int = 1, size: int = 20,
+                                sort: str = "relevance") -> NaverNewsPage:
+    """Search descriptions and page metadata only. Diffbot is deferred to report creation."""
+    result = await fetch_naver_page(keyword, page=page, size=size, sort=sort)
+    result.articles = await inspect_naver_articles(result.articles)
     return result
+
+
+def expansion_supported() -> bool:
+    """News-map expansion never uses legacy providers with silent sample fallbacks."""
+    return settings.mock_news_active or settings.news_provider == "naver"
+
+
+async def fetch_search_page(keyword: str, *, start: int, size: int) -> NaverNewsPage:
+    """One raw relevance-sorted page from an explicit start, before category checks."""
+    if settings.mock_news_active:
+        fixture = [_normalize(a) for a in _load_mock()]
+        window = fixture[start - 1:start - 1 + size]
+        return NaverNewsPage(articles=[{**a, "_search_rank": start + i} for i, a in enumerate(window)],
+                             total=len(fixture), start=start, end=start + len(window) - 1)
+    if settings.news_provider != "naver":
+        raise RuntimeError("News-map expansion requires the NAVER provider or mock fixtures")
+    return await fetch_naver_page(keyword, start=start, size=size, sort="relevance")
+
+
+async def inspect_search_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if settings.mock_news_active:
+        return articles
+    return await inspect_naver_articles(articles)
 
 
 async def fetch_news(keyword: str, page_size: int = 20) -> list[dict[str, Any]]:

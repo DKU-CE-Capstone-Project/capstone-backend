@@ -1,7 +1,7 @@
 # EconMind Backend
 
 실시간 경제 뉴스 검색·뉴스맵·AI 리포트 API. FastAPI / Python 3.11 이상.
-프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 이 README는 **2026-10-01 로컬 `article-api` 브랜치**의 뉴스 경로와 뉴스맵 선정 설정을 설명한다. 작업 시작 커밋은 `c65dfbd866620f993d37d3c670abf73b4c64a06b`이며 미커밋 변경 없이 시작했다. 결과 코드 커밋은 정본 `docs/99-verification.md`의 2026-10-01 기록에 남긴다. 기존 뉴스 세션 경로는 정본의 2026-09-21 병합 기록을 따르며, 이번 뉴스맵 변경은 로컬 구현·검증 범위다. [API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)의 과거 계약과 날짜별 추가 내용을 구분해 읽는다. 원격 반영·운영 배포는 수행하지 않았다.
+프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 이 README는 **2026-10-01 로컬 `article-api` 브랜치**의 뉴스 경로와 뉴스맵 선정 설정을 설명한다. 같은 날 2차 작업 시작 커밋은 `0a462f8ba080f957e6855e3cb224b17007fd876d`이며 미커밋 변경 없이 시작했다. 결과 코드 커밋은 정본 `docs/99-verification.md`의 2026-10-01 기록에 남긴다. 기존 뉴스 세션 경로는 정본의 2026-09-21 병합 기록을 따르며, 이번 뉴스맵 변경은 로컬 구현·검증 범위다. [API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)의 과거 계약과 날짜별 추가 내용을 구분해 읽는다. 원격 반영·운영 배포는 수행하지 않았다.
 
 ## 뉴스 공급원 변경 이유
 
@@ -26,61 +26,70 @@
 - `description`, `naver_url`, `naver_categories`, `keywords`, `categories`, `metadata_extraction`, `content_source_url`을 MongoDB 왕복 변환에서 보존한다.
 - Diffbot 성공 캐시는 1시간, 실패 캐시는 30초이며 이미지 선택 규칙 버전을 키에 포함한다. NAVER 분류 캐시는 5분, 실패 캐시는 15초다.
 
-## 뉴스맵 반복 보도 정리와 다양성 선정 (2026-10-01)
+## 뉴스맵 같은 소식 묶음과 20→50 후보 확장 (2026-10-01 2차)
 
-이미 정해진 중심 기사의 제목·NAVER description을 기준으로 주변 기사를 선정한다. 최초 중심 기사 선정과 실제 다단계 그래프 확장은 이번 범위에서 변경하지 않았다.
+이미 정해진 중심 기사의 제목·NAVER description을 기준으로 주변 기사를 고른다. 최초 중심 기사 선정과 다단계 그래프 확장은 바꾸지 않았다. 1차(`0a462f8`)의 반복 판별은 제한된 동작 어휘(공개·출시 등)를 못 찾으면 무조건 "반복 아님"을 반환해 금리·국제유가처럼 제품이 아닌 경제 뉴스의 재보도가 주변을 차지했다. 이번에는 판별 규칙을 다시 쓰고, 반복 보도를 버리지 않고 **같은 소식 묶음**으로 응답한다.
 
-기존 방식은 ID·URL·정규화 제목/설명이 다른 재서술 기사를 남긴 뒤 중심과의 연관도만으로 정렬했다. 따라서 동일 발표의 반복 보도가 주변 자리를 차지할 수 있었다. 명확한 중복 제거는 기사 식별 중복을, 반복 보도 판별은 같은 사건의 같은 전달 정보를, MMR은 통과 후보 사이의 과도한 유사성을 각각 다룬다.
+### 처리 순서
 
-1. 같은 검색어의 메모리·MongoDB 기사를 먼저 모은다. 기본 40건이며 최종 표시 limit과 별개다. 원시 후보 3건을 기준으로 재검색하던 분기를 제거했다.
-2. 중심 자신·같은 ID/정규화 URL/정규화 제목과 설명의 중복·입력 없는 후보를 제외한다. 같은 주제의 별개 기사는 일괄 중복 처리하지 않는다.
-3. 기사별 `Title: {title}\nDescription: {description}` 형식으로 Gemini 임베딩을 생성하거나 저장 벡터를 재사용한다. HTML·공백을 정리하고 제목 500자·설명 6,000자까지 사용한다. 설명이 없으면 제목만 사용하며 본문·생성 summary를 보충하지 않는다. 뉴스맵에서는 Diffbot을 새로 호출하지 않는다.
-4. 서버 코사인·근거 있는 키워드 보조 점수·등록 조직명만 겹칠 때 감점을 유지한다. 설정과 요청 중 큰 최소 연관도를 적용한다.
-5. 중심과 각 후보를 직접 비교해 사실상 같은 전달 정보인 후보를 제외한다. 후보끼리도 비교하고, 중심과 다른 반복 보도 묶음은 대표 1건만 남긴다. 묶음의 **모든 구성원과** 반복 판정이 성립해야 합류하므로 A~B·B~C만으로 A와 C를 합치지 않는다. 대표는 연관도 → description 길이 → 기사 ID·URL·텍스트 등의 고정 순서로 결정한다.
-6. 첫 기사는 최고 연관도, 이후는 `λ × 중심 연관도 − (1−λ) × 이미 선택한 주변 기사와의 최대 코사인`으로 하나씩 선택한다. MMR 동점은 연관도·고정 기사 키로 결정한다. 기존 벡터와 기사 쌍별 코사인을 재사용하며 기사 쌍마다 생성 API를 호출하지 않는다.
-7. 요금제·요청의 최종 개수를 적용한다. 유효 후보가 부족할 때만 아래 제한 수집을 거쳐 같은 기준으로 다시 평가하며, 끝까지 부족하면 **0·1·2건도 정상 결과**다.
+후보 확보 → 같은 ID·같은 기사 URL 제외 → Gemini 임베딩·코사인 중심 연관도 → 최소 연관도 → 같은 소식 판별·묶음 → MMR → 표시 개수 제한 → 부족하면 예산 안에서 후보 확장 후 같은 기준으로 이어서 선정.
 
-[반복 보도 규칙](app/agents/repeated_coverage.py)은 제공된 제목·description의 대상/모델·사건 종류·명시 날짜/기간·수치·관점과 문자 bigram Dice 유사도, 발행 시각을 함께 사용한다. 코사인이나 회사명만으로 합치지 않는다. 모델·숫자·시점 또는 비교·소비자 반응·실적 영향 등의 단서가 다르면 보존한다. 명시 날짜가 충돌하면 보존한다. 양쪽에 일치하는 연도 포함 사건 날짜가 없는 경우에는 알려진 timezone 포함 발행 시각의 근접성도 필요하다. 발행 시각을 사건 날짜로 만들거나 빠진 연도를 추측하지 않는다. 설명이 40자 미만이면 공통 모델·긴 제목의 높은 유사도와 짧은 설명의 새 문구 비율을 추가 확인한다. 근거가 없으면 보존하는 보수적 규칙이며 제한된 어휘 밖의 사건과 표현 변화는 놓칠 수 있다.
+1. **최초 후보**: 같은 검색어로 저장된 메모리·MongoDB 기사를 **최근 검색 세션 → NAVER 원시 순위** 순서로 정렬해 고유 후보 `NEWS_MAP_INITIAL_CANDIDATES`(20)개를 평가한다. 기사 ID 순으로 자르지 않는다. 검색 시 `_search_rank`(원시 위치)·`_search_end`(요청한 마지막 원시 위치)·`_searched_at`를 저장하고 MongoDB 왕복에서도 보존한다.
+2. **식별 중복**: 중심 자신과 같은 ID·정규화 URL(`url`, `naver_url`)만 제외한다. 제목·설명이 같아도 다른 매체 URL이면 별도 후보이며, 아래 판별에서 같은 소식으로 묶인다.
+3. **연관도**: 기존 공식 `clip(0.9·max(cos,0) + 0.1·J − p)`과 최소 연관도(설정·요청 중 큰 값)를 그대로 쓴다. 벡터는 입력 해시·모델·차원·용도·전처리 버전이 같으면 재사용한다.
+4. **같은 소식 판별**([repeated_coverage.py](app/agents/repeated_coverage.py)): 후보마다 중심과 직접 비교해 `repeat`(같은 사건·정보 대부분 반복) / `same_event_new_info`(같은 사건+의미 있는 추가 사실·분석) / `different_event`(관련 있지만 다른 사건·시점·결과) / `insufficient_evidence`(설명이 짧거나 시간이 없어 판단 불가) 중 하나로 판정한다. 중심과 `repeat`이면 중심 묶음, 아니면 앞서 남은 대표와 같은 방식으로 비교해 대표 묶음에 넣거나 새 대표가 된다(완전 연결: 묶음의 모든 구성원과 같은 소식이어야 합류).
+5. **MMR**: 묶음 대표끼리 `λ·중심 연관도 − (1−λ)·이미 고른 대표와의 최대 코사인`으로 고른다. 공개 `relevance_score`는 중심 연관도이며 MMR 점수가 아니다. 후보 확장 라운드는 이미 고른 주변 기사를 바꾸지 않고 뒤에 이어 붙인다.
+6. **확장**: 고른 대표가 표시 목표(FREE/BASIC `min(limit,3)`, PAID `limit`)보다 적을 때만 ①남은 저장 후보 → ②중심 제목·설명·근거 키워드의 첫 보충 검색어 → ③원래 검색어의 다음 원시 위치(`_search_end + 1`부터) → ④나머지 보충 검색어 순으로 추가한다. 목표 도달·고유 후보 50개·외부 검색 단계 수·전체 시간 중 먼저 닿는 곳에서 멈춘다. 관련성 기준은 낮추지 않으며 끝까지 부족하면 적은 결과를 정상으로 반환한다.
 
-[공통 API 수집 경로](app/api/v1/news.py)의 보충은 기존 후보의 선정 결과가 유효 목표 `min(limit,3)`(FREE/BASIC) 또는 `limit`(PAID)에 못 미칠 때만 시작한다. 실제 제목·description·근거 있는 키워드로 검색어를 만들고 원래 검색어/중복 검색은 제외한다. 기본 **추가 검색 2회, 페이지당 12건, 추가 고유 후보 20건, 추가 수집·저장·선정 전체 20초**다. 총 평가 후보는 기본 40+20건 이하다. 목표 달성 또는 예산 소진 시 멈춘다. 성공·빈 검색은 프로세스 로컬 60초/128키 캐시, 실패는 5초 오류 캐시, 동시 동일 검색은 단일 요청으로 공유한다. 재시작·여러 프로세스 간 캐시는 공유하지 않는다.
+### 같은 소식 판별 기준
 
-추가 수집은 실패를 샘플로 대체하지 않는 NAVER 경로와 명시적 mock 모드에 한정한다. 샘플 fallback이 남은 실 GDELT/NewsAPI 경로에서는 보충하지 않는다. NAVER URL·분류 제외 정책은 그대로 적용한다. 새 보충 기사 메타데이터는 기존 검증된 결과를 재사용하거나 로컬 규칙으로 채우며 **Flex 생성·RAG 임베딩을 새로 호출하지 않는다**. 규칙 캐시는 정상 검색의 AI 추출을 막지 않는 별도 모드다. 정상 검색의 메타데이터/RAG 처리는 유지하며 호환되지 않는 기존 RAG 벡터는 보충 저장에서 제거한다. 보충 후보의 뉴스맵 벡터는 기존 구조로 생성·저장한다. 기본 상한에서 새 뉴스맵 임베딩은 보충 기사 최대 20건이며 NAVER 페이지 분류/OG 이미지 HTTP 비용도 추가된다. 실제 비용·지연은 측정하지 않았다.
+- **같은 사건의 단서**: 제목의 경제 대상(국채 만기·국가별 금리, 기준금리, 주담대·신용대출·예금 금리, 유가·브렌트·WTI, 원유 재고·공급, 환율, 증시, 물가, 성장률 등), 제품 종류·모델명, 공유 제목 수치, 제목 핵심어 2개 이상. 회사명만 겹치는 것은 단서가 아니다. 어휘에 없는 사건도 제목·설명 겹침과 아래 충돌 검사로 판단하며, 어휘를 못 찾았다는 이유만으로 "반복 아님"을 반환하지 않는다.
+- **다른 사건(보존)**: 서로 다른 모델명, 다른 진행 단계(공개 vs 가격 인상·판매 개시·결렬 vs 타결 등), 같은 대상의 반대 방향(상승 vs 하락, 인상 vs 동결), 같은 종류 제목 수치의 불일치, 제목 날짜·설명 첫 날짜의 명시적 불일치, 발행 시각 48시간 초과.
+- **누락과 충돌 구분**: 한쪽에만 있는 수치·날짜는 충돌이 아니다. 수치는 반올림(5.3% ↔ 5.304%), 만·억·조 단위의 1% 이내 반올림(1209억 ↔ 1200억)을 같은 값으로 본다. 설명 스니펫 수치는 같은 라벨·단위의 값이 양쪽에 하나씩만 있을 때만 비교하며 2.5% 이내 보도 차이는 허용한다. "30일(현지시간)"과 "1일"처럼 12시간 안의 인접 일자는 시차로 본다.
+- **추가 정보(보존)**: 제목에 새 경제 대상·제품·모델·분석 관점(전망·영향·분석·비교·반응·위험 등)이 있거나, 제목의 새 단어가 그 기사 설명에도 실제로 나오거나 영문·숫자 고유명(예: MZ, HBM4)인 경우(2개 이상·비율 기준), 설명에 새 대상·관점이 2개 이상이면서 중심 본문과 겹침이 낮은 경우. "처음" 같은 단어 하나, 한쪽에만 있는 배경 날짜·수치, 설명에 근거 없는 편집 제목 표현은 추가 정보로 보지 않는다.
+- **반복 확인**: 위 조건을 모두 통과하고 코사인 0.92 이상·발행 시각 48시간 이내이며, 제목 유사도·설명 포함률·공유 구조 2개 이상·후보 제목 핵심어 전부 포함·매우 높은 의미 유사도(≈0.947) 중 하나가 있어야 `repeat`이다. 설명에 근거가 없는 새 제목 단어가 2개 이상이면 매우 높은 의미 유사도일 때만 반복으로 인정한다.
+- **짧은 설명**: 40자 미만이면 판단 근거 부족이다. 제목·설명이 정규화 후 완전히 같은 전재 기사는 반복으로 묶고, 보이는 내용이 중심과 같지만 확인할 수 없는 기사는 묶지도 주변에 두지도 않는다(진단 로그 `withheld`). 새 내용이 있으면 주변 후보로 남긴다.
+- 별칭은 `한은 → 한국은행`, 한자 표기(`美`, `弗`) 정규화만 한다. 낙농 문맥의 "원유"는 원유(석유) 대상으로 읽지 않지만 검색어 "원유"를 석유로 치환하지는 않는다.
 
-`/related`와 `/graph`는 [공통 선정 함수](app/agents/related_selector.py)와 같은 요금제 정책을 사용한다. 두 API 모두 `tier=FREE`, `limit=10`(1~50), `min_relevance=0`을 기본값으로 받는다. FREE/BASIC도 내부 평가·필터·정렬을 수행하며 마지막에 `min(limit, 3)`건만 반환하고 `relevance_score=null`로 숨긴다. PAID는 요청 limit에 따라 반환하고 점수를 노출한다. `include_score`는 호환용이며 FREE/BASIC의 점수 숨김을 해제하지 않는다. `tier`는 쿼리 값이며 실제 구독 확인 기능은 아직 없다. **기존 `/graph` 호출도 tier를 생략하면 이제 주변 최대 3건**이다. 모든 주변 노드는 직접 연결이므로 `distance=1`이다. `/relations`의 기존 단어 중첩 점수는 별도 의미다.
+규칙 사전과 임계값은 2026-10-01 실제 뉴스 표본으로 보정한 **초기값**이다(정본 `docs/99-verification.md`). 새 생성형 AI 호출은 추가하지 않았다. 기사 쌍 판별을 Flex 생성 모델로 하면 요청마다 수십 쌍의 지연·비용·비결정성이 생기기 때문이며, 필요하면 별도 상한·캐시 설계 후 후속 과제로 다룬다.
 
-검색·연관 기사·그래프 노드는 [공통 카드 변환](app/news_cards.py)을 사용해 `description`, `source_name`, `source_url`, `published_at`, `thumbnail_url`, `keywords`, `categories`를 함께 반환한다. `/related`는 주변 기사 목록, `/graph`는 중심 기사와 전체 노드·연결선을 반환하며 중심의 `distance=0`, `relevance_score=null`이다. `limit`은 중심을 제외한 주변 개수다. 설명은 자르지 않고, `summary`는 description 우선·기존 summary 대체 규칙을 유지한다. `/related`의 응답도 `RelatedResponse`로 OpenAPI에 명시한다.
+### 후보·호출·시간 상한
 
-최종 점수는 `clip((1-w) * max(cosine, 0) + w * J - p, 0, 1)`이다. `J`는 조직명을 제외한 키워드 집합의 Jaccard 값이며, `p`는 등록된 조직명이 겹치면서 다른 핵심어는 겹치지 않을 때만 적용한다. `AI`, `HBM`, `HBM3E`, `금리`와 확인된 별칭을 보존하고, 같은 제목·설명에서 추출된 메타데이터는 집합으로 합쳐 반복 가산하지 않는다. 현재 가중치·임계값은 **실제 뉴스 품질 평가 전 초기값**이다.
-
-| 환경변수 | 기본값 | 역할 |
+| 환경변수 | 기본값 | 의미 |
 |---|---|---|
-| `NEWS_MAP_EMBEDDING_MODEL` | `gemini-embedding-001` | 뉴스맵 전용 모델 |
-| `NEWS_MAP_EMBEDDING_DIMENSIONS` | `768` | 요청·검증 차원 |
-| `NEWS_MAP_EMBEDDING_TASK_TYPE` | `SEMANTIC_SIMILARITY` | 중심·후보에 같은 용도 적용 |
-| `NEWS_MAP_CANDIDATE_LIMIT` | `40` | 최종 표시 수와 별개인 후보 상한 |
+| `NEWS_MAP_INITIAL_CANDIDATES` | `20` | 최초 라운드 고유 후보 수(검색 순서) |
+| `NEWS_MAP_MAX_CANDIDATES` | `50` | 요청당 평가하는 **고유 주변 후보 총상한**. 중심 제외, 같은 ID·URL 중복 제외. 저장 후보·원래 검색 다음 위치·보충 검색 후보를 합산 |
+| `NEWS_MAP_SUPPLEMENT_MAX_SEARCHES` | `3` | 외부 검색 **단계** 상한(원래 검색 다음 위치 + 보충 검색어). 0이면 외부 검색 없음 |
+| `NEWS_MAP_SUPPLEMENT_PAGE_SIZE` | `20` | 외부 검색 한 번의 NAVER 원시 요청 건수 |
+| `NEWS_MAP_SUPPLEMENT_TIMEOUT_SECONDS` | `20` | 확장 전체(검색·분류 확인·저장·임베딩·재선정) 시간 |
+| `NEWS_MAP_SUPPLEMENT_CACHE_TTL_SECONDS` | `60` | 검색 페이지 성공/빈 결과 프로세스 캐시. 실패는 5초 실패 캐시 |
+| `NEWS_MAP_SAME_STORY_LIMIT` | `10` | 노드마다 응답에 담는 같은 소식 카드 수(전체 건수는 별도) |
+| `NEWS_MAP_REPEAT_TITLE_SIMILARITY` | `0.50` | 반복 확인의 제목 문자 유사도 기준 |
+| `NEWS_MAP_REPEAT_COSINE` | `0.92` | 반복의 필요조건, 단독 판정 금지 |
+| `NEWS_MAP_REPEAT_TEXT_SIMILARITY` | `0.55` | 설명 포함률 기준 |
+| `NEWS_MAP_REPEAT_SHORT_TEXT_SIMILARITY` | `0.85` | 짧은 설명에서 제목 유사도 기준 |
+| `NEWS_MAP_REPEAT_MAX_HOURS` | `48` | 반복 인정 발행 시각 간격 |
+| `NEWS_MAP_REPEAT_DESCRIPTION_MIN_CHARS` | `40` | 짧은 설명 경계 |
+| `NEWS_MAP_REPEAT_NOVELTY_RATIO` | `0.25` | 제목 새 단어 비율 기준(공유 구조가 강하면 1.6배) |
+| `NEWS_MAP_EMBEDDING_MODEL` / `DIMENSIONS` / `TASK_TYPE` | `gemini-embedding-001` / `768` / `SEMANTIC_SIMILARITY` | 뉴스맵 전용 벡터 |
 | `NEWS_MAP_EMBEDDING_CONCURRENCY` | `3` | 벡터 생성 동시성 |
-| `NEWS_MAP_MIN_RELEVANCE` | `0.65` | 최소 최종 점수; 요청값과 큰 쪽 적용 |
-| `NEWS_MAP_KEYWORD_WEIGHT` | `0.10` | 보조 키워드 비중 |
-| `NEWS_MAP_ENTITY_ONLY_PENALTY` | `0.10` | 등록된 조직명만 겹칠 때 감점 |
-| `NEWS_MAP_MMR_LAMBDA` | `0.70` | 관련성 비중; 나머지 0.30은 주변 간 최대 유사도 감점 |
-| `NEWS_MAP_REPEAT_COSINE` | `0.92` | 반복 판별의 필요조건, 단독 판정 금지 |
-| `NEWS_MAP_REPEAT_TEXT_SIMILARITY` | `0.55` | 설명 및 제목/설명 평균 Dice 유사도 하한 |
-| `NEWS_MAP_REPEAT_SHORT_TEXT_SIMILARITY` | `0.85` | 짧은 설명에서 제목 유사도 하한 |
-| `NEWS_MAP_REPEAT_MAX_HOURS` | `48` | 완전한 공통 사건 날짜가 없을 때 발행 시각 간격 상한 |
-| `NEWS_MAP_REPEAT_DESCRIPTION_MIN_CHARS` | `40` | 짧은 설명 처리 경계 |
-| `NEWS_MAP_REPEAT_NOVELTY_RATIO` | `0.25` | 짧은 설명의 새 bigram 비중이 넘으면 보존 |
-| `NEWS_MAP_SUPPLEMENT_MAX_SEARCHES` | `2` | 추가 검색 상한; 0이면 비활성화 |
-| `NEWS_MAP_SUPPLEMENT_PAGE_SIZE` | `12` | 검색당 요청 기사 수 |
-| `NEWS_MAP_SUPPLEMENT_CANDIDATE_LIMIT` | `20` | 추가 고유 후보 상한; 0이면 비활성화 |
-| `NEWS_MAP_SUPPLEMENT_TIMEOUT_SECONDS` | `20` | 추가 수집·저장·재선정 전체 제한 시간 |
-| `NEWS_MAP_SUPPLEMENT_CACHE_TTL_SECONDS` | `60` | 추가 검색 성공/빈 결과 캐시 TTL |
-| `EMBEDDING_TIMEOUT_SECONDS` | `30` | 기존 임베딩 호출 제한 시간 |
+| `NEWS_MAP_MIN_RELEVANCE`, `KEYWORD_WEIGHT`, `ENTITY_ONLY_PENALTY`, `MMR_LAMBDA` | `0.65`, `0.10`, `0.10`, `0.70` | 기존 연관도·MMR 설정 |
 
-λ=0.70은 관련성을 우선하면서 중복 감점을 주기 위한 출발점이다. 높은 반복 코사인·문자 유사도·40자/48시간 기준은 오탐을 줄이고, 2회/20건/20초는 추가 비용을 제한하기 위한 초기 예산이다. **모든 새 임계값과 가중치는 실뉴스 평가로 튜닝해야 하며 최적값으로 검증하지 않았다.** 설정 범위는 [Settings](app/config.py)에서 검증한다.
+`NEWS_MAP_CANDIDATE_LIMIT`(40)과 `NEWS_MAP_SUPPLEMENT_CANDIDATE_LIMIT`(20)은 하나의 총상한으로 대체해 삭제했다. 최초 수가 총상한보다 크면 설정 검증이 실패한다. 원시 검색 결과 수와 필터 후 고유 후보 수는 따로 집계하며, 고유 후보를 채우려고 원시 검색을 반복하지 않는다(단계 수·시간 상한). 원래 검색 이어 받기는 저장된 `_search_end` 다음 위치에서 시작하므로 페이지 크기가 바뀌어도 원시 위치가 겹치거나 빠지지 않는다. 다만 실시간 검색 순위가 그사이 바뀌는 것까지는 막을 수 없다.
 
-공개 `relevance_score`는 위 중심 연관도 공식 그대로다. MMR 점수나 반복 점수로 덮어쓰지 않으며 **최종 응답 순서는 relevance_score 내림차순과 다를 수 있다**. 추가 검색의 인증/공급원/시간 오류는 기존 502·503·504를 유지하고 추가 전체 시간 초과는 504다. 임베딩 실패는 503이며 이미 고른 일부 결과를 성공으로 반환하지 않는다. 정상 빈 결과와 실패를 구분한다.
+확장 후보는 NAVER 분류 확인(정치·사회 제외)을 필요한 수만큼만 하고, 규칙 메타데이터와 뉴스맵 벡터만 만든다. **Diffbot 본문 추출·리포트 생성·Flex 메타데이터·RAG 임베딩은 실행하지 않는다.** 원래 검색 이어 받기 결과는 같은 검색 세션 후보로 저장돼 다음 요청은 외부 검색 없이 재사용한다. 레거시 GDELT/NewsAPI(실패 시 샘플 대체)에서는 외부 확장을 하지 않는다.
 
-[벡터 저장·재사용](app/agents/article_embeddings.py)은 입력 SHA-256·모델·차원·용도·전처리 버전을 확인한다. 뉴스맵은 `news_map_embedding`, 기존 리포트 RAG는 `embedding`·`embedding_metadata`와 `EMBEDDING_MODEL`·768차원 인덱스를 사용한다. 내용·설정이 바뀐 기사만 필요할 때 다시 생성하며 전체 DB 삭제·재생성은 하지 않는다. 평가에 필요한 벡터가 없거나 API 실패·차원 불일치 등이 발생하면 503을 반환한다. 실패를 0점이나 일부 후보의 성공 목록으로 처리하지 않는다.
+### API 계약(`/related`, `/graph` 공통)
+
+- 새 쿼리 `expand`(기본 `true`). `false`면 최초 후보만 평가하고, 더 찾을 수 있으면 `selection.status="expandable"`을 준다. 프론트는 이 결과를 먼저 그린 뒤 `expand=true`로 다시 요청한다.
+- 주변 카드에 `same_story`(같은 소식 다른 보도 카드 목록, 발행 순)·`same_story_total`. `/related`는 `center_same_story`·`center_same_story_total`, `/graph`는 `center_node.same_story`를 쓴다. 묶인 카드는 기존 카드 필드(제목·설명·출처·발행 시각·원문 링크·썸네일·키워드·카테고리)만 있고 **점수·거리 필드가 없다.** 묶음은 주변 노드 수를 소비하지 않는다.
+- `selection`: `status`(`complete`·`insufficient`·`partial`·`expandable`), `reason`(`exhausted`·`candidate_limit`·`search_limit`·`no_source`·`timeout`·`search_failed`·`embedding_failed`·`storage_failed`), `requested`(요금제 적용 후 목표), `returned`.
+- 최초 라운드의 임베딩 실패는 503이다. 확장 중 검색 실패·시간 초과·확장 후보 임베딩 실패·저장 실패는 이미 확정된 최초 결과를 200 `partial`로 반환한다(1차의 502/503/504 오류 응답에서 변경).
+- FREE/BASIC 최대 3건·점수 `null`, PAID 요청 limit·중심 연관도 점수는 그대로다. `tier`는 쿼리이며 실제 구독 인증은 아니다.
+
+### 진단 로그
+
+요청마다 `econmind.news_map` 로거가 한 줄을 남긴다: 저장 후보 수, 최초 평가 수, 외부 검색 단계·실제 호출·캐시 적중, 원시 결과·원시 중복·분류 제외, 라운드, 단계별 추가 수, 상태·이유, 평가 수, 연관도 미달, 중심 반복·묶음·보류 수, 그룹·선택 수, 임베딩 실제 호출·재사용 수, 처리 시간. 기사 ID(해시) 외에 제목·검색어·키·벡터는 남기지 않는다.
 
 ## 로컬 실행
 
@@ -133,7 +142,7 @@ NCP 요청은 `https://naverapihub.apigw.ntruss.com/search/v1/news`에 `X-NCP-AP
 | `POST /analyze` | 기존 분석 호환 경로 |
 | `GET`·`DELETE /api/v1/session`, `POST /api/v1/session/mindmap/expand`·`collapse`, `DELETE /api/v1/session/mindmap` | 쿠키 기반 세션 식별·마인드맵 상태. 아래 「세션」 참고 |
 
-전체 요청·응답 형식은 [뉴스 세션 API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)와 해당 브랜치 실행 중인 `/docs`를 참고한다. `/health`는 실제 DB ping이 아니며 `/ready`가 이를 검사한다. 현재 프론트 `article-api`는 `/related?tier=FREE` 결과를 서버 순서대로 표시하고 `/graph`로 보충하지 않는다. 주변 기사 선정만 제한적으로 재개했으며, 키워드맵 알고리즘·다단계 확장·세션 상태 연동은 계속 보류한다. NCP 인증·응답 오류는 안전한 메시지로 전달하며, 검색 오류를 mock 뉴스로 대체하지 않는다.
+전체 요청·응답 형식은 [뉴스 세션 API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)와 해당 브랜치 실행 중인 `/docs`를 참고한다. `/health`는 실제 DB ping이 아니며 `/ready`가 이를 검사한다. 현재 프론트 `article-api`는 `/related?tier=FREE&expand=false` 결과를 먼저 서버 순서대로 표시하고, `expandable`이면 같은 중심으로 `expand=true`를 다시 요청한다. `/graph`로 보충하지 않는다. 주변 기사 선정만 제한적으로 재개했으며, 키워드맵 알고리즘·다단계 확장·세션 상태 연동은 계속 보류한다. NCP 인증·응답 오류는 안전한 메시지로 전달하며, 검색 오류를 mock 뉴스로 대체하지 않는다.
 
 ## 세션 (쿠키 기반 사용자 식별)
 
@@ -166,7 +175,7 @@ SESSION_COOKIE_SAMESITE=lax    # 프론트와 API가 다른 출처면 none(+secu
 
 ## 검증과 배포
 
-2026-10-01: Python 3.13.5 프로젝트 가상환경에서 **238 passed**(별도 실제 로컬 MongoDB 4.4.18 왕복 3개 포함), 변경 Python 12개 파일 Ruff 통과, `compileall` 성공, `uv build --offline --wheel` 성공. Gemini·NAVER·Diffbot은 fixture/mock이며 기본 테스트는 외부 소켓을 차단한다. MongoDB 검사는 opt-in URI의 고유 테스트 DB만 사용·정리한다. 기본 실행은 MongoDB 검사 3개를 건너뛴다. 자세한 사례는 [다양성 테스트](tests/test_news_map_diversity.py)·[제한 수집 테스트](tests/test_related_supplement.py)에 있다. 한국어 제목·설명은 직접 작성한 가상 사례이며 실제 기사 출처나 실뉴스 의미 품질 검증을 뜻하지 않는다.
+2026-10-01 2차: Python 3.13.5 프로젝트 가상환경에서 기본 실행 **260 passed, 3 skipped**, 별도 로컬 MongoDB 4.4.18(127.0.0.1:27028, 테스트마다 고유 DB 생성·삭제) 지정 시 **263 passed**. 변경 Python 16개 파일 Ruff 통과(`app/database.py`의 기존 8건은 이번에 수정하지 않은 줄), `compileall`·`uv build --offline --wheel` 성공. Gemini·NAVER·Diffbot은 fixture/mock이며 기본 테스트는 외부 소켓을 차단한다. [판별·묶음·MMR 테스트](tests/test_news_map_diversity.py)·[확장·상태·캐시·API 계약 테스트](tests/test_news_map_expansion.py)의 한국어 기사는 직접 작성한 가상 사례이며 실뉴스 품질 평가가 아니다. 실뉴스 표본 비교와 남은 한계는 정본 `docs/99-verification.md`에 별도로 기록한다.
 
 ```bash
 NEWS_MAP_TEST_MONGODB_URI=mongodb://127.0.0.1:27028 .venv/bin/python -m pytest -q
@@ -174,7 +183,9 @@ NEWS_MAP_TEST_MONGODB_URI=mongodb://127.0.0.1:27028 .venv/bin/python -m pytest -
 uv build --offline --wheel --out-dir /tmp/econmind-news-map-wheels-20261001
 ```
 
-Ruff 대상: `app/agents/{article_metadata,related_selector,repeated_coverage,related_candidates}.py`, `app/{config,utils}.py`, `app/api/v1/news.py`, `tests/{conftest,test_article_metadata,test_news_map_mongo,test_news_map_diversity,test_related_supplement}.py`다. 아래 2026-09-18·2026-09-30 결과는 과거 기록으로 보존한다. 이번 앱 Docker 이미지 빌드·Python 3.11 실행·실제 외부 API·운영 배포는 수행하지 않았다.
+Ruff 대상: `app/agents/{article_embeddings,graph_builder,naver_client,news_fetcher,news_map,related_candidates,related_selector,repeated_coverage}.py`, `app/{config,main,schemas}.py`, `app/api/v1/news.py`, `tests/{test_news_map_diversity,test_news_map_expansion,test_news_map_mongo,test_related_selection}.py`. 아래 이전 결과는 과거 기록으로 보존한다. 앱 Docker 이미지 빌드·Python 3.11 실행·운영 배포는 이번에 수행하지 않았다.
+
+2026-10-01 1차(`0a462f8`): 238 passed(로컬 MongoDB 3개 포함). 1차의 `tests/test_related_supplement.py`는 2차 확장 설계로 대체되어 `tests/test_news_map_expansion.py`가 되었다.
 
 ```bash
 .venv/bin/python -m pytest -q

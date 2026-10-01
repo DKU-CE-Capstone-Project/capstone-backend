@@ -68,9 +68,26 @@ class SourceResponse(BaseModel):
 
 # ── /api/v1/news/{id}/graph ───────────────────────────────────────────────────
 
+class SameStoryArticle(NewsCard):
+    """Another outlet's report repeating a displayed node's information. Never scored."""
+
+
 class NewsMapCard(NewsCard):
     distance: int
     relevance_score: float | None = None  # PAID only; the center has no pair score.
+    # Grouped repeats do not consume neighbour slots; ordered by publication time.
+    same_story: list[SameStoryArticle] = Field(default_factory=list)
+    same_story_total: int = 0
+
+
+class NewsMapSelection(BaseModel):
+    """complete: target reached. insufficient: normal shortage after the bounded search.
+    partial: expansion failed or timed out; the returned neighbours are still valid.
+    expandable: only with expand=false; call again with expand=true to search further."""
+    status: Literal["complete", "insufficient", "partial", "expandable"]
+    reason: str | None = None
+    requested: int
+    returned: int
 
 
 class GraphNode(NewsMapCard):
@@ -88,6 +105,7 @@ class GraphResponse(BaseModel):
     center_node: GraphNode
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    selection: NewsMapSelection | None = None
 
 
 # ── /api/v1/news/{id}/related ─────────────────────────────────────────────────
@@ -98,6 +116,9 @@ class RelatedNewsItem(NewsMapCard):
 
 class RelatedResponse(BaseModel):
     related_news: list[RelatedNewsItem]
+    center_same_story: list[SameStoryArticle] = Field(default_factory=list)
+    center_same_story_total: int = 0
+    selection: NewsMapSelection | None = None
 
 
 # ── /api/v1/news/selections ───────────────────────────────────────────────────

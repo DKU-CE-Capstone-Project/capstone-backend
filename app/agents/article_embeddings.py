@@ -8,6 +8,7 @@ import math
 import re
 import unicodedata
 from collections import OrderedDict
+from contextvars import ContextVar
 from copy import deepcopy
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -19,6 +20,19 @@ from app.config import settings
 MAP_VERSION = "news-map-text-v1"
 _cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _inflight: WeakKeyDictionary = WeakKeyDictionary()
+# Per-request counts only (never inputs or vector values), for news-map diagnostics.
+_usage: ContextVar[dict[str, int] | None] = ContextVar("embedding_usage", default=None)
+
+
+def track_usage() -> dict[str, int]:
+    usage = {"embedding_calls": 0, "embedding_reused": 0}
+    _usage.set(usage)
+    return usage
+
+
+def _count(usage: dict[str, int] | None, name: str) -> None:
+    if usage is not None:
+        usage[name] += 1
 
 
 class EmbeddingUnavailable(RuntimeError):
@@ -89,16 +103,22 @@ async def article_vector(article: dict[str, Any], purpose: str = "news_map", *, 
         raise EmbeddingUnavailable("Article has no embedding input")
     # Metadata has fixed insertion order and contains no secrets.
     key = repr(metadata)
+    usage = _usage.get()
     loop_tasks = _inflight.setdefault(asyncio.get_running_loop(), {})
     task = loop_tasks.get(key)
-    if task is None:
+    if task is not None:
+        _count(usage, "embedding_reused")
+    else:
         async def resolve() -> dict[str, Any]:
             record = _record(article, purpose)
             if not _matches(record, metadata):
                 record = _cache.get(key)
             if not _matches(record, metadata) and settings.use_mongodb:
                 record = await database.get_news_embedding(article.get("news_id", ""), purpose)
-            if not _matches(record, metadata):
+            if _matches(record, metadata):
+                _count(usage, "embedding_reused")
+            else:
+                _count(usage, "embedding_calls")
                 try:
                     if purpose == "rag":
                         values = await llm.embed(text)

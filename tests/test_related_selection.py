@@ -5,8 +5,9 @@ from fastapi.testclient import TestClient
 
 from app import store
 from app.agents import article_embeddings as embeddings
-from app.agents import llm
+from app.agents import llm, news_map
 from app.agents.related_selector import (
+    NewsMapSelector,
     cosine_similarity,
     keyword_tokens,
     select_related,
@@ -82,15 +83,20 @@ async def test_changing_center_recalculates_ranking(corpus):
     assert ids(result) == ["a-low"]
 
 
-async def test_self_exact_copies_and_url_duplicates_excluded_but_topic_kept(corpus):
+async def test_only_id_and_url_are_identity_duplicates_and_exact_copies_are_grouped(corpus):
     articles, _ = corpus
+    for a in articles:
+        a["published_at"] = "2026-09-30T09:00:00Z"
     duplicate = {**articles[3], "news_id": "dup", "url": "https://other.test/copy"}
     same_url = {**articles[2], "news_id": "alias", "url": articles[0]["url"] + "?utm_source=feed"}
-    result = await select_related(articles[0], [*articles, duplicate, same_url], limit=20)
-    assert len(result) == 2
-    assert "b-mid" in ids(result)
-    assert {"dup", "z-high"} & set(ids(result))
-    assert "center" not in ids(result) and "alias" not in ids(result)
+    selector = NewsMapSelector(articles[0])
+    # The center and its tracking-URL alias are identity duplicates; another outlet's copy is not.
+    assert await selector.add([*articles, duplicate, same_url]) == 5
+    groups = selector.select(20)
+    assert len(groups) == 2 and groups[1].representative.article["news_id"] == "b-mid"
+    # Equal relevance ties use the fixed article key; the other copy is a group member.
+    story = {groups[0].representative.article["news_id"], *(m.article["news_id"] for m in groups[0].members)}
+    assert story == {"z-high", "dup"} and len(groups[0].members) == 1
 
 
 async def test_different_description_same_title_is_not_a_duplicate(monkeypatch):
@@ -240,8 +246,12 @@ async def test_concurrent_same_input_single_provider_call(monkeypatch):
 
 
 async def test_candidate_budget_is_independent_of_display_limit(monkeypatch, corpus):
-    monkeypatch.setattr(settings, "news_map_candidate_limit", 3)
-    candidates = await news._related_articles("center")
-    assert len(candidates) == 3
-    monkeypatch.setattr(settings, "news_map_candidate_limit", 40)
-    assert len(await news._related_articles("center")) == 4
+    articles, _ = corpus
+    monkeypatch.setattr(settings, "news_map_initial_candidates", 3)
+    pool = await news_map.cached_pool(articles[0])
+    assert [a["news_id"] for a in pool if a["news_id"] != "center"] == ["a-low", "b-mid", "unrelated", "z-high"]
+    one = await news_map.build_news_map(articles[0], target=1, expand=False)
+    six = await news_map.build_news_map(articles[0], target=6, expand=False)
+    assert one.stats["initial"] == six.stats["initial"] == 3
+    monkeypatch.setattr(settings, "news_map_initial_candidates", 20)
+    assert (await news_map.build_news_map(articles[0], target=6, expand=False)).stats["initial"] == 4

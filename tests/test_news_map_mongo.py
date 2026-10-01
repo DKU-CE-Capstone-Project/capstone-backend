@@ -9,7 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from app import database, store
 from app.agents import article_embeddings as embeddings
-from app.agents import llm
+from app.agents import llm, news_fetcher, news_map, related_candidates
 from app.api.v1 import news
 from app.config import settings
 from app.utils import cache_articles
@@ -90,32 +90,44 @@ async def test_local_mongo_reuse_refresh_and_candidate_reload(local_mongo, monke
     assert len(stored["embedding"]) == 768
 
 
-async def test_local_mongo_endpoints_pool_has_same_order_after_restart(local_mongo, monkeypatch):
+async def test_local_mongo_pool_keeps_search_rank_and_selection_after_restart(local_mongo, monkeypatch):
     async def embed(text, **kwargs):
         return [1.0] + [0.0] * (kwargs.get("dimensions", 768) - 1)
+
     async def forbidden_fetch(*args, **kwargs):
         pytest.fail("Persisted candidate pool should avoid a new external news search")
+
     monkeypatch.setattr(llm, "embed", embed)
-    monkeypatch.setattr(news, "fetch_news", forbidden_fetch)
-    articles = await cache_articles([{"title": f"AI GPU 소식 {i}", "description": f"제품 출시 {i}",
-                                    "url": f"https://example.test/{i}", "_search_keyword": "AI"} for i in range(5)])
+    monkeypatch.setattr(news_fetcher, "fetch_search_page", forbidden_fetch)
+    session = "2026-10-01T00:00:00+00:00"
+    # IDs deliberately disagree with search rank; the pool must follow rank.
+    articles = await cache_articles([{"title": f"AI GPU 소식 {i}", "description": f"제품 출시 정보 {i}",
+                                      "news_id": f"z{9 - i}", "url": f"https://example.test/{i}",
+                                      "published_at": "2026-09-30T09:00:00Z", "_search_keyword": "AI",
+                                      "_search_rank": i + 1, "_search_end": 20, "_searched_at": session}
+                                     for i in range(5)])
     center_id = articles[0]["news_id"]
-    center = await store.get_news(center_id)
-    before = await news._selected_related(center, 10)
+    store.news_cache.clear()
+    persisted = await database.news_candidates("AI", 40)
+    assert [a["news_id"] for a in persisted] == ["z9", "z8", "z7", "z6", "z5"]
+    assert persisted[0]["_search_rank"] == 1 and persisted[0]["_searched_at"] == session
+    assert "embedding" not in persisted[0] or persisted[0]["embedding"] == []
+    before = await news_map.build_news_map(await store.get_news(center_id), target=10)
     store.news_cache.clear()
     embeddings._cache.clear()
-    after = await news._selected_related(await store.get_news(center_id), 10)
-    assert [r.article["news_id"] for r in after] == [r.article["news_id"] for r in before]
-    free = await news.get_related(center_id, limit=10, min_relevance=0, include_score=False, tier="FREE")
+    after = await news_map.build_news_map(await store.get_news(center_id), target=10)
+    assert [g.representative.article["news_id"] for g in after.groups] == \
+        [g.representative.article["news_id"] for g in before.groups]
+    free = await news.get_related(center_id, limit=10, min_relevance=0, include_score=False, tier="FREE", expand=True)
     graph = await news.get_graph(center_id, depth=3, limit=10, include_distance=True,
-                                 min_relevance=0, include_score=False, tier="FREE")
+                                 min_relevance=0, include_score=False, tier="FREE", expand=True)
     assert [a.news_id for a in free.related_news] == [a.news_id for a in graph.nodes[1:]]
-    assert len(graph.nodes) == 4 and len(free.related_news) == 3
+    assert len(free.related_news) <= 3 and free.selection == graph.selection
 
 
-async def test_local_mongo_supplement_card_and_map_vectors_survive_restart(local_mongo, monkeypatch):
-    from tests.test_news_map_diversity import release
-    from tests.test_related_supplement import new_angle
+async def test_local_mongo_expansion_cards_and_map_vectors_survive_restart(local_mongo, monkeypatch):
+    from app.agents.naver_client import NaverNewsPage
+    from tests.test_news_map_expansion import angle, cached, repeat
 
     calls, searches = [], []
 
@@ -123,25 +135,35 @@ async def test_local_mongo_supplement_card_and_map_vectors_survive_restart(local
         calls.append((text, kwargs))
         return [1.0] + [0.0] * (kwargs.get("dimensions", 768) - 1)
 
-    async def fetch(query, page_size):
-        searches.append(query)
-        return [new_angle()]
+    async def fetch(query, *, start, size):
+        searches.append((query, start))
+        found = [{**angle("forecast"), "_search_rank": start}]
+        return NaverNewsPage(articles=found, total=1, start=start, end=start + size - 1)
+
+    async def passthrough(articles):
+        return articles
 
     monkeypatch.setattr(llm, "embed", embed)
-    monkeypatch.setattr(news, "fetch_news", fetch)
+    monkeypatch.setattr(news_fetcher, "fetch_search_page", fetch)
+    monkeypatch.setattr(news_fetcher, "inspect_search_articles", passthrough)
     monkeypatch.setattr(settings, "news_map_supplement_max_searches", 1)
     monkeypatch.setattr(settings, "news_provider", "naver")
     monkeypatch.setattr(settings, "use_mock_news", False)
-    await cache_articles([release("center"), release("copy")])
-    before = await news._selected_related(await store.get_news("center"), 1)
-    assert [item.article["news_id"] for item in before] == ["reaction"]
-    saved = await local_mongo[database.NEWS].find_one({"news_id": "reaction"})
-    assert "embedding" not in saved  # No extra RAG generation during supplement.
+    from tests.test_news_map_diversity import OIL_CENTER, oil
+    await cache_articles([cached(oil("center", *OIL_CENTER), 1), cached(repeat(1), 2)])
+    before = await news_map.build_news_map(await store.get_news("center"), target=1)
+    assert [g.representative.article["news_id"] for g in before.groups] == ["forecast"]
+    assert len(searches) == 1 and searches[0][0] != "국제유가" and searches[0][1] == 1
+    saved = await local_mongo[database.NEWS].find_one({"news_id": "forecast"})
+    assert "embedding" not in saved  # No extra RAG generation during expansion.
     assert saved["news_map_embedding"]["metadata"]["purpose"] == "news_map"
+    assert saved["_search_keyword"] == searches[0][0] and saved["_search_rank"] == 1
     count = len(calls)
     store.news_cache.clear()
     embeddings._cache.clear()
-    after = await news._selected_related(await store.get_news("center"), 1)
-    assert [item.article["news_id"] for item in after] == ["reaction"]
-    assert after[0].article["description"] == new_angle()["description"]
-    assert len(calls) == count and len(searches) == 1  # DB vectors + process-local query cache.
+    related_candidates._cache.clear()
+    after = await news_map.build_news_map(await store.get_news("center"), target=1)
+    assert [g.representative.article["news_id"] for g in after.groups] == ["forecast"]
+    assert after.groups[0].representative.article["description"] == angle("forecast")["description"]
+    # The saved card and map vector are reused after the restart: no new vectors.
+    assert len(calls) == count and after.stats["embedding_calls"] == 0

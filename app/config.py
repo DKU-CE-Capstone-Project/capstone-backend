@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -90,7 +90,10 @@ class Settings(BaseSettings):
     news_map_embedding_model: str = "gemini-embedding-001"
     news_map_embedding_dimensions: int = Field(default=768, ge=128, le=3072)
     news_map_embedding_task_type: Literal["SEMANTIC_SIMILARITY", "CLUSTERING"] = "SEMANTIC_SIMILARITY"
-    news_map_candidate_limit: int = Field(default=40, ge=3, le=100)
+    # Unique neighbour candidates evaluated per map request, center excluded. The first
+    # round uses the cached original-search pool; expansion may grow it to the total.
+    news_map_initial_candidates: int = Field(default=20, ge=3, le=50)
+    news_map_max_candidates: int = Field(default=50, ge=3, le=50)
     news_map_embedding_concurrency: int = Field(default=3, ge=1, le=10)
     # Initial values, pending evaluation on real Korean news pairs.
     news_map_min_relevance: float = Field(default=0.65, ge=0, le=1)
@@ -99,18 +102,25 @@ class Settings(BaseSettings):
     news_map_mmr_lambda: float = Field(default=0.70, ge=0, le=1)
     news_map_repeat_cosine: float = Field(default=0.92, ge=0, le=1)
     news_map_repeat_text_similarity: float = Field(default=0.55, ge=0, le=1)
+    news_map_repeat_title_similarity: float = Field(default=0.50, ge=0, le=1)
     news_map_repeat_short_text_similarity: float = Field(default=0.85, ge=0, le=1)
     news_map_repeat_max_hours: float = Field(default=48, gt=0, le=168)
     news_map_repeat_description_min_chars: int = Field(default=40, ge=0, le=500)
     news_map_repeat_novelty_ratio: float = Field(default=0.25, ge=0, le=1)
-    # Extra work starts only after relevance/repeat filtering leaves a shortage.
-    news_map_supplement_max_searches: int = Field(default=2, ge=0, le=3)
-    news_map_supplement_page_size: int = Field(default=12, ge=1, le=20)
-    news_map_supplement_candidate_limit: int = Field(default=20, ge=0, le=60)
+    news_map_same_story_limit: int = Field(default=10, ge=0, le=50)
+    # Expansion starts only after relevance/repeat cleanup leaves a shortage.
+    news_map_supplement_max_searches: int = Field(default=3, ge=0, le=5)
+    news_map_supplement_page_size: int = Field(default=20, ge=1, le=50)
     news_map_supplement_timeout_seconds: float = Field(default=20, gt=0, le=60)
     news_map_supplement_cache_ttl_seconds: float = Field(default=60, gt=0, le=600)
     use_rag: bool = True       # 리포트 생성 시 벡터검색으로 유사 과거 뉴스 근거 주입
     use_critic: bool = True    # 생성된 리포트를 검증(critic) 에이전트로 점검
+
+    @model_validator(mode="after")
+    def _news_map_budget(self):
+        if self.news_map_initial_candidates > self.news_map_max_candidates:
+            raise ValueError("NEWS_MAP_INITIAL_CANDIDATES must not exceed NEWS_MAP_MAX_CANDIDATES")
+        return self
 
     @property
     def mock_news_active(self) -> bool:
