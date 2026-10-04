@@ -147,7 +147,14 @@ async def create_report(
         "verification": verification,
         "created_at": now,
     }
-    await database.save_report(full_report)  # MongoDB write-through (use_mongodb 시)
+    # MongoDB write-through (use_mongodb 시). 선택 기사 경로와 같은 schema_version 2 문서로 저장한다.
+    await database.save_report(database.report_doc_from_result({
+        **full_report,
+        "requested_news_ids": [body.news_id, *related_ids],
+        "report_type": body.report_type,
+        "language": body.language,
+        "updated_at": now,
+    }))
     store.report_cache[report_id] = full_report
     store.report_index[cache_key] = report_id
 
