@@ -5,7 +5,13 @@ import socket
 import pytest
 
 from app import store
-from app.agents import article_metadata, diffbot_client, naver_categories
+from app.agents import (
+    article_embeddings,
+    article_metadata,
+    diffbot_client,
+    naver_categories,
+    related_candidates,
+)
 from app.config import settings
 
 
@@ -28,6 +34,7 @@ def offline_settings(monkeypatch):
         "use_llm_summaries": False,
         "use_rag": False,
         "use_critic": False,
+        "news_map_supplement_max_searches": 0,
     }.items():
         monkeypatch.setattr(settings, key, value)
 
@@ -36,6 +43,8 @@ def offline_settings(monkeypatch):
 
     monkeypatch.setattr(socket.socket, "connect", reject_network)
     article_metadata._cache.clear()
+    article_embeddings._cache.clear()
+    related_candidates._cache.clear()
     diffbot_client._extraction_cache.clear()
     naver_categories._cache.clear()
     naver_categories._images.clear()
@@ -52,6 +61,8 @@ def offline_settings(monkeypatch):
         cache.clear()
     yield
     article_metadata._cache.clear()
+    article_embeddings._cache.clear()
+    related_candidates._cache.clear()
     store.news_cache.clear()
 
 

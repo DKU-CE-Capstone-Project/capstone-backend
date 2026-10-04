@@ -2,118 +2,85 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.agents.diffbot_client import is_article_image_url
+from app import store
 from app.agents import naver_categories
-from app.agents.filter_agent import _content_tokens, _overlap_coefficient
+from app.agents.article_embeddings import EmbeddingUnavailable
+from app.agents.filter_agent import _content_tokens
 from app.agents.graph_builder import _relevance_score, build_graph
 from app.agents.news_fetcher import fetch_naver_news_page, fetch_news
+from app.agents.news_map import NewsMapResult, build_news_map, display_target
+from app.agents.related_selector import article_id
 from app.config import settings
+from app.news_cards import thumbnail as _thumb
+from app.news_cards import to_news_card as _to_news_card
 from app.schemas import (
     GraphResponse,
-    NewsCard,
+    NewsMapSelection,
     NewsSelectionRequest,
     NewsSelectionResponse,
     RelatedNewsItem,
+    RelatedResponse,
     RelationScore,
     RelationsResponse,
     SearchResponse,
     SourceResponse,
     ThumbnailResponse,
 )
-from app import store
-from app.utils import cache_articles, make_news_id, tier_ok
+from app.utils import cache_articles, tier_ok
 
 router = APIRouter()
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-_FALLBACK_IMAGES = [
-    "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1516937941344-00b4e0337589?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1509391366360-2e959784a276?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1526304640581-d334cdbbf45e?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1473341304170-971dccb5ac1e?auto=format&fit=crop&w=520&q=80",
-]
-
-
-def _thumb(art: dict[str, Any], idx: int = 0) -> tuple[str, bool]:
-    """Return (thumbnail_url, fallback_used)."""
-    url = art.get("thumbnail_url") or ""
-    if is_article_image_url(url):
-        return url, False
-    return _FALLBACK_IMAGES[idx % len(_FALLBACK_IMAGES)], True
-
-
-def _to_news_card(art: dict[str, Any], idx: int = 0) -> NewsCard:
-    thumb, _ = _thumb(art, idx)
-    title = art.get("title", "")
-    return NewsCard(
-        news_id=art.get("news_id") or make_news_id(art.get("url", "")),
-        title=title,
-        summary=(art.get("summary") or art.get("description") or title)
-        if art.get("_news_provider") == "naver" else (title or art.get("summary") or art.get("description", "")),
-        thumbnail_url=thumb,
-        source_name=art.get("source", ""),
-        published_at=art.get("published_at", ""),
-        related_stock_names=[],
-        source_url=art.get("naver_url") or art.get("url", ""),
-        description=art.get("description", ""),
-        keywords=art.get("keywords", []),
-        categories=art.get("categories", []),
-    )
-
-
 async def _fetch_and_cache(keyword: str) -> list[dict[str, Any]]:
     """Fetch news list results and cache them without dropping source thumbnails."""
+    fetched = await fetch_news(keyword, page_size=20)
+    now = datetime.now(UTC).isoformat()
     raw_articles = [
-        {**article, "_search_keyword": keyword}
-        for article in await fetch_news(keyword, page_size=20)
+        {**article, "_search_keyword": keyword, "_search_rank": rank, "_search_end": len(fetched),
+         "_searched_at": now}
+        for rank, article in enumerate(fetched, 1)
     ]
     return await cache_articles(raw_articles)
 
 
 async def _naver_search_response(keyword: str, page: int, size: int, sort: str) -> SearchResponse:
     result = await fetch_naver_news_page(keyword, page=page, size=size, sort=sort)
-    articles = await cache_articles([{**a, "_search_keyword": keyword} for a in result.articles])
+    # Raw rank/end let the news map continue this exact search without gaps or repeats.
+    session = {"_search_keyword": keyword, "_search_end": result.end, "_searched_at": datetime.now(UTC).isoformat()}
+    found = result.articles
+    if sort != "relevance":
+        # Map continuation follows relevance order only; latest-order positions are not ranks.
+        session.pop("_search_end")
+        found = [{k: v for k, v in a.items() if k != "_search_rank"} for a in found]
+    articles = await cache_articles([{**a, **session} for a in found])
     return SearchResponse(news_cards=[_to_news_card(a, i) for i, a in enumerate(articles)],
                           total_count=result.total)
 
 
-async def _related_articles(news_id: str, extra: int = 8) -> list[dict[str, Any]]:
-    """
-    Return related articles for a cached article.
+async def _news_map(
+    center: dict[str, Any], limit: int, min_relevance: float = 0.0, tier: str = "FREE", expand: bool = True,
+) -> NewsMapResult:
+    """/related and /graph share one selection, tier policy and failure contract."""
+    try:
+        return await build_news_map(center, target=display_target(limit, tier), min_relevance=min_relevance,
+                                    expand=expand)
+    except EmbeddingUnavailable as exc:
+        # Without a complete first round there is no valid result to return.
+        raise HTTPException(
+            status_code=503,
+            detail="연관 기사 임베딩을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        ) from exc
 
-    Strategy:
-    1. Return other cached articles from the same search (same _search_keyword).
-    2. If fewer than 3, re-fetch using the original search keyword.
-    """
-    center = await store.get_news(news_id)
-    if not center:
-        raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found. Search first.")
 
-    original_keyword = center.get("_search_keyword", "")
-
-    # 1) Already-cached articles from the same search
-    same_search = [
-        art for nid, art in store.news_cache.items()
-        if nid != news_id and art.get("_search_keyword") == original_keyword
-    ]
-    if len(same_search) >= 3:
-        return same_search[:extra]
-
-    # 2) Re-fetch using the original keyword (or first meaningful title word as fallback)
-    if not original_keyword:
-        tokens = list(_content_tokens(center.get("title", "")))
-        original_keyword = tokens[0] if tokens else center.get("title", "")[:15]
-
-    raw = await fetch_news(original_keyword, page_size=extra + 2)
-    enriched = await cache_articles([{**a, "_search_keyword": original_keyword} for a in raw])
-    return [a for a in enriched if a.get("news_id") != news_id]
+def _selection(result: NewsMapResult) -> NewsMapSelection:
+    return NewsMapSelection(status=result.status, reason=result.reason, requested=result.target,
+                            returned=len(result.items))
 
 
 # ── GET /search ───────────────────────────────────────────────────────────────
@@ -208,62 +175,64 @@ async def get_source(news_id: str) -> SourceResponse:
 async def get_graph(
     news_id: str,
     depth: int = Query(default=2, ge=1, le=3),
-    limit: int = Query(default=10, ge=1, le=30),
+    limit: int = Query(default=10, ge=1, le=50),
     include_distance: bool = Query(default=True),
+    min_relevance: float = Query(default=0.0, ge=0.0, le=1.0),
+    include_score: bool = Query(default=False),
+    tier: str = Query(default="FREE", pattern="^(FREE|BASIC|PAID)$"),
+    expand: bool = Query(default=True, description="false면 최초 후보만 평가하고 확장 가능 여부를 반환"),
 ) -> GraphResponse:
     """마인드맵 데이터를 반환합니다."""
     center = await store.get_news(news_id)
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
-    related = await _related_articles(news_id, extra=limit + 2)
-    graph = build_graph(center, related[:limit], include_distance=include_distance)
+    result = await _news_map(center, limit, min_relevance, tier, expand)
+    related = result.items
+    scores = {article_id(item.article): round(item.score, 6) for item in related} if tier_ok(tier, "PAID") else {}
+    graph = build_graph(
+        center, [item.article for item in related], include_distance=include_distance, scores=scores,
+    )
 
-    return GraphResponse(**graph)
+    return GraphResponse(**graph, selection=_selection(result))
 
 
 # ── GET /{news_id}/related ────────────────────────────────────────────────────
 
-@router.get("/{news_id}/related")
+@router.get("/{news_id}/related", response_model=RelatedResponse)
 async def get_related(
     news_id: str,
     limit: int = Query(default=10, ge=1, le=50),
     min_relevance: float = Query(default=0.0, ge=0.0, le=1.0),
     include_score: bool = Query(default=False),
     tier: str = Query(default="FREE", pattern="^(FREE|BASIC|PAID)$"),
-) -> dict[str, Any]:
+    expand: bool = Query(default=True, description="false면 최초 후보만 평가하고 확장 가능 여부를 반환"),
+) -> RelatedResponse:
     """
     연관 뉴스를 반환합니다.
-    FREE: 최대 3개, relevance_score 미포함.
-    PAID: 제한 없음 + relevance_score 포함.
+    FREE/BASIC: 최대 3개, relevance_score 미포함. PAID: 요청 limit 적용 + relevance_score 포함.
+    모든 요금제는 같은 관련성 필터·반복 정보 제외·MMR을 수행합니다.
+    반복 보도는 표시에서 제외하며 묶음 목록이나 건수를 반환하지 않습니다.
+    응답 순서는 다양성 선정 순서이며 점수는 중심과의 연관도입니다.
     """
     center = await store.get_news(news_id)
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
     is_paid = tier_ok(tier, "PAID")
-    effective_limit = limit if is_paid else min(limit, 3)
-
-    related = await _related_articles(news_id, extra=effective_limit + 5)
+    result = await _news_map(center, limit, min_relevance, tier, expand)
 
     items: list[RelatedNewsItem] = []
-    for i, art in enumerate(related[:effective_limit]):
-        score = _relevance_score(center, art) if (is_paid or include_score) else None
-        if min_relevance > 0 and score is not None and score < min_relevance:
-            continue
-        thumb, _ = _thumb(art, i)
+    for i, item in enumerate(result.items):
+        art, score = item.article, item.score
         items.append(
             RelatedNewsItem(
-                news_id=art.get("news_id") or make_news_id(art.get("url", "")),
-                title=art.get("title", ""),
-                summary=art.get("title", "") or art.get("summary") or art.get("description", ""),
-                thumbnail_url=thumb,
-                relevance_score=score if is_paid else None,
+                **_to_news_card(art, i).model_dump(),
+                relevance_score=round(score, 6) if is_paid else None,
                 distance=1,
             )
         )
-
-    return {"related_news": [item.model_dump() for item in items]}
+    return RelatedResponse(related_news=items, selection=_selection(result))
 
 
 # ── POST /selections (PAID) ───────────────────────────────────────────────────
@@ -284,7 +253,7 @@ async def create_selection(
             selected.append({"news_id": nid, "title": art.get("title", "")})
 
     sid = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     store.selection_cache[sid] = {
         "selection_id": sid,
         "news_ids": body.news_ids,

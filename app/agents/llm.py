@@ -105,14 +105,23 @@ async def _generate_gemini(prompt: str) -> str:
         return ""
 
 
-async def embed(text: str) -> list[float]:
+async def embed(
+    text: str, *, model: str | None = None, dimensions: int = 768,
+    task_type: str | None = None,
+) -> list[float]:
     try:
-        return await asyncio.wait_for(_embed(text), settings.embedding_timeout_seconds)
+        return await asyncio.wait_for(
+            _embed(text, model=model, dimensions=dimensions, task_type=task_type),
+            settings.embedding_timeout_seconds,
+        )
     except TimeoutError:
         return []
 
 
-async def _embed(text: str) -> list[float]:
+async def _embed(
+    text: str, *, model: str | None = None, dimensions: int = 768,
+    task_type: str | None = None,
+) -> list[float]:
     """Gemini 임베딩 벡터(768차원) 반환. 키 없음/오류 시 빈 리스트(graceful).
 
     임베딩 쿼터는 generate_content와 별도 버킷이라 비교적 여유롭다.
@@ -126,9 +135,9 @@ async def _embed(text: str) -> list[float]:
         from google.genai import types as gtypes
 
         resp = await client.aio.models.embed_content(
-            model=settings.embedding_model,
+            model=model or settings.embedding_model,
             contents=text[:8000],
-            config=gtypes.EmbedContentConfig(output_dimensionality=768),
+            config=gtypes.EmbedContentConfig(output_dimensionality=dimensions, task_type=task_type),
         )
         # google-genai: resp.embeddings[0].values
         embs = getattr(resp, "embeddings", None)
@@ -136,5 +145,5 @@ async def _embed(text: str) -> list[float]:
             return list(embs[0].values)
         return []
     except Exception as e:  # noqa: BLE001
-        print(f"[llm] embed error (skip): {type(e).__name__}: {e}")
+        print(f"[llm] embed error (skip): {type(e).__name__}")
         return []

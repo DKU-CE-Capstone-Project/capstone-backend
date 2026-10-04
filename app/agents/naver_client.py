@@ -28,6 +28,9 @@ class NaverNewsError(Exception):
 class NaverNewsPage:
     articles: list[dict[str, Any]]
     total: int
+    # Raw search positions covered by this request, before any URL/category filter.
+    start: int = 1
+    end: int = 0
 
 
 class _PlainText(HTMLParser):
@@ -99,10 +102,11 @@ def normalize_naver_article(item: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def fetch_naver_page(
-    keyword: str, *, page: int = 1, size: int = 20, sort: str = "relevance"
+    keyword: str, *, page: int = 1, size: int = 20, sort: str = "relevance", start: int | None = None,
 ) -> NaverNewsPage:
     query = keyword.strip()
-    start = (page - 1) * size + 1
+    # An explicit start continues a previous request even when its page size differed.
+    start = (page - 1) * size + 1 if start is None else start
     if not query or page < 1 or not 1 <= size <= 100 or not 1 <= start <= 1000:
         raise NaverNewsError(
             "검색어·페이지 범위를 확인해 주세요. 네이버 검색 시작 위치는 최대 1000입니다.",
@@ -160,9 +164,10 @@ async def fetch_naver_page(
     if type(total) is not int or total < 0:
         raise NaverNewsError("네이버 뉴스 검색 결과 수가 올바르지 않습니다.")
     articles, seen = [], set()
-    for item in payload["items"][:size]:
+    items = payload["items"][:size]
+    for position, item in enumerate(items, start):
         article = normalize_naver_article(item) if isinstance(item, dict) else None
         if article and article["url"] not in seen:
-            articles.append(article)
+            articles.append({**article, "_search_rank": position})
             seen.add(article["url"])
-    return NaverNewsPage(articles=articles, total=total)
+    return NaverNewsPage(articles=articles, total=total, start=start, end=start + len(items) - 1)

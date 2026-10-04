@@ -243,6 +243,22 @@ async def test_identical_articles_share_one_batch_call(monkeypatch, metadata_ai)
     assert results[1]["keywords"] == ["HBM"]
 
 
+async def test_map_rule_mode_does_not_prevent_later_ai_or_discard_cached_ai(monkeypatch, metadata_ai):
+    calls = []
+
+    async def generate(prompt):
+        calls.append(prompt)
+        return '{"keywords":["HBM"],"categories":["반도체"]}'
+
+    monkeypatch.setattr(metadata, "generate", generate)
+    local = await metadata.extract_metadata(article(), allow_llm=False)
+    assert local["metadata_extraction"]["method"] == "rules" and calls == []
+    normal = await metadata.extract_metadata(article(**local))
+    assert normal["metadata_extraction"]["method"] == "llm" and len(calls) == 1
+    cached = await metadata.extract_metadata(article(**normal), allow_llm=False)
+    assert cached == normal and len(calls) == 1
+
+
 async def test_mongo_write_reload_and_cache_reuse(monkeypatch, metadata_ai):
     saved = {}
     calls = 0
@@ -292,7 +308,8 @@ async def test_mongo_write_reload_and_cache_reuse(monkeypatch, metadata_ai):
 def test_legacy_document_without_metadata_can_be_read():
     loaded = database.article_from_news_doc({"title": "Old", "summary": "Old summary"})
     assert loaded["keywords"] == [] and loaded["categories"] == []
-    assert loaded["description"] == "Old summary"
+    assert loaded["description"] == ""
+    assert loaded["summary"] == "Old summary"
 
 
 def test_search_source_and_search_again_preserve_body_metadata(

@@ -138,8 +138,12 @@ def news_doc_from_article(art: dict[str, Any]) -> dict[str, Any]:
         doc["thumbnail_url"] = art["thumbnail_url"]
     if art.get("_search_keyword"):
         doc["_search_keyword"] = art["_search_keyword"]
+        # Search-session membership keeps the original rank order after a restart.
+        for key in ("_search_rank", "_search_end", "_searched_at"):
+            if art.get(key):
+                doc[key] = art[key]
     # Preserve extraction inputs/provenance so Mongo reloads can reuse valid results.
-    for key in ("description", "title_original", "metadata_extraction", "_news_provider", "naver_url", "naver_categories", "content_source_url"):
+    for key in ("description", "title_original", "metadata_extraction", "_news_provider", "naver_url", "naver_categories", "content_source_url", "embedding", "embedding_metadata", "news_map_embedding"):
         if key in art:
             doc[key] = art[key]
     return doc
@@ -167,11 +171,13 @@ def article_from_news_doc(doc: dict[str, Any]) -> dict[str, Any]:
         "url": doc.get("url", ""),
         "source": source.get("name", "") if isinstance(source, dict) else (source or ""),
         "published_at": _iso_z(doc.get("published_at")),
-        "description": doc.get("description", doc.get("summary", "")),
+        # Legacy/generated summaries remain summaries, never search descriptions.
+        "description": doc.get("description", ""),
         "summary": doc.get("summary", ""),
         "thumbnail_url": doc.get("thumbnail_url", ""),
         "cleaned_content": doc.get("content", ""),
         "_search_keyword": doc.get("_search_keyword", ""),
+        **{key: doc[key] for key in ("_search_rank", "_search_end", "_searched_at") if doc.get(key)},
         "title_original": doc.get("title_original", doc.get("title", "")),
         "keywords": list(doc.get("keywords") or []),
         "categories": list(doc.get("categories") or []),
@@ -180,6 +186,9 @@ def article_from_news_doc(doc: dict[str, Any]) -> dict[str, Any]:
         "naver_url": doc.get("naver_url", ""),
         "naver_categories": doc.get("naver_categories", []),
         "content_source_url": doc.get("content_source_url", ""),
+        "embedding": doc.get("embedding", []),
+        "embedding_metadata": doc.get("embedding_metadata"),
+        "news_map_embedding": doc.get("news_map_embedding"),
     }
 
 
@@ -298,6 +307,10 @@ async def save_news(doc: dict[str, Any]) -> None:
     on_insert = {k: payload.pop(k) for k in ("created_at", "collected_at") if k in payload}
     try:
         update: dict[str, Any] = {"$set": payload}
+        if "embedding" not in payload:
+            # An updated article with a failed refresh must not retain a stale RAG
+            # vector in the database. This only affects the article being saved.
+            update["$unset"] = {"embedding": "", "embedding_metadata": ""}
         if on_insert:
             update["$setOnInsert"] = on_insert
         await db[NEWS].update_one({"url": payload["url"]}, update, upsert=True)
@@ -352,10 +365,62 @@ async def get_news(news_id: str) -> dict[str, Any] | None:
     if db is None:
         return None
     try:
-        doc = await db[NEWS].find_one({"news_id": news_id}, {"_id": 0, "embedding": 0})
+        doc = await db[NEWS].find_one({"news_id": news_id}, {"_id": 0})
         return article_from_news_doc(doc) if doc else None
     except Exception:  # noqa: BLE001
         return None
+
+
+async def get_news_embedding(news_id: str, purpose: str) -> dict[str, Any] | None:
+    db = _get_db()
+    if db is None or not news_id:
+        return None
+    fields = {"news_map_embedding": 1} if purpose == "news_map" else {"embedding": 1, "embedding_metadata": 1}
+    try:
+        doc = await db[NEWS].find_one({"news_id": news_id}, {"_id": 0, **fields})
+        if not doc:
+            return None
+        if purpose == "news_map":
+            return doc.get("news_map_embedding")
+        return {"values": doc.get("embedding"), "metadata": doc.get("embedding_metadata")}
+    except Exception as exc:
+        if settings.mongodb_required:
+            raise DatabasePersistenceError("Embedding lookup failed") from exc
+        return None
+
+
+async def save_news_embedding(news_id: str, purpose: str, record: dict[str, Any]) -> None:
+    db = _get_db()
+    _require_available(db)
+    if db is None or not news_id:
+        return
+    payload = {"news_map_embedding": record} if purpose == "news_map" else {
+        "embedding": record["values"], "embedding_metadata": record["metadata"],
+    }
+    try:
+        await db[NEWS].update_one({"news_id": news_id}, {"$set": payload}, upsert=False)
+    except Exception as exc:
+        if settings.mongodb_required:
+            raise DatabasePersistenceError("Embedding persistence failed") from exc
+        print(f"[mongo] embedding save skip: {type(exc).__name__}")
+
+
+async def news_candidates(keyword: str, limit: int) -> list[dict[str, Any]]:
+    """Bounded same-search pool in search order (latest session, raw rank), after a restart too."""
+    db = _get_db()
+    if db is None or not keyword:
+        return []
+    try:
+        order = [("_searched_at", -1), ("_search_rank", 1), ("published_at", -1), ("news_id", 1)]
+        # Map selection needs card fields and map vectors, not bodies or RAG vectors.
+        projection = {"content": 0, "embedding": 0, "embedding_metadata": 0}
+        cursor = db[NEWS].find({"_search_keyword": keyword, "is_deleted": {"$ne": True}}, projection)
+        cursor = cursor.sort(order).limit(limit)
+        return [article_from_news_doc(doc) async for doc in cursor]
+    except Exception as exc:
+        if settings.mongodb_required:
+            raise DatabasePersistenceError("News candidate lookup failed") from exc
+        return []
 
 
 async def get_report(report_id: str) -> dict[str, Any] | None:

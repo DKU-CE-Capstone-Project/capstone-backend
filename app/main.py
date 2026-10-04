@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -8,6 +10,14 @@ from app.api.v1 import jobs, keywords, news, reports, sessions, strategies
 from app.config import settings
 from app.database import DatabasePersistenceError
 from app.session import SESSION_COOKIE, new_session_id
+
+# News-map diagnostics are aggregate counts only; uvicorn does not configure app loggers.
+_diagnostics = logging.getLogger("econmind")
+if not _diagnostics.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s %(message)s"))
+    _diagnostics.addHandler(_handler)
+    _diagnostics.setLevel(logging.INFO)
 
 app = FastAPI(
     title="Capstone — News Multi-Agent API",

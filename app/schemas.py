@@ -68,11 +68,22 @@ class SourceResponse(BaseModel):
 
 # ── /api/v1/news/{id}/graph ───────────────────────────────────────────────────
 
-class GraphNode(BaseModel):
-    news_id: str
-    title: str
-    summary: str
+class NewsMapCard(NewsCard):
     distance: int
+    relevance_score: float | None = None  # PAID only; the center has no pair score.
+
+
+class NewsMapSelection(BaseModel):
+    """complete: target reached. insufficient: normal shortage after the bounded search.
+    partial: expansion failed or timed out; the returned neighbours are still valid.
+    expandable: only with expand=false; call again with expand=true to search further."""
+    status: Literal["complete", "insufficient", "partial", "expandable"]
+    reason: str | None = None
+    requested: int
+    returned: int
+
+
+class GraphNode(NewsMapCard):
     is_center: bool = False
 
 
@@ -87,17 +98,18 @@ class GraphResponse(BaseModel):
     center_node: GraphNode
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    selection: NewsMapSelection | None = None
 
 
 # ── /api/v1/news/{id}/related ─────────────────────────────────────────────────
 
-class RelatedNewsItem(BaseModel):
-    news_id: str
-    title: str
-    summary: str
-    thumbnail_url: str
-    relevance_score: float | None = None  # PAID 전용
-    distance: int
+class RelatedNewsItem(NewsMapCard):
+    pass
+
+
+class RelatedResponse(BaseModel):
+    related_news: list[RelatedNewsItem]
+    selection: NewsMapSelection | None = None
 
 
 # ── /api/v1/news/selections ───────────────────────────────────────────────────

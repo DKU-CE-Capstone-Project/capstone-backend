@@ -1,0 +1,119 @@
+{
+  "provenance": {
+    "snapshot": "/Users/munjuan/Documents/ChatGPT/capstone/.local/newsmap-eval-20261001/heldout-snapshot.json",
+    "taken_at": "2026-10-01T09:49:24.774685+00:00",
+    "diagnosis": ".local/newsmap-review-20261001-v2/tariff-followup-diagnosis.json",
+    "vectors": "Mock unit vectors reproduce the saved diagnostic cosines; no external calls."
+  },
+  "center": {
+    "title": "산업장관 \"대미투자, 관세 압박 관리 차원…15% 상한선 재확인\"",
+    "url": "https://www.yna.co.kr/view/AKR20260923159400003?input=1195m",
+    "naver_url": "https://n.news.naver.com/mnews/article/001/0016348752?sid=101",
+    "source": "yna.co.kr",
+    "published_at": "2026-09-30T21:09:00Z",
+    "description": "미국 '과잉생산 관세' 추가 부과 시 15% 초과 우려 일축 \"대미 통상 관계, 고비 계속 넘는 과정\"…반도체 추가 투자는 논의서 빠져 신창용 장보인 기자 = 도널드 트럼프 미국 행정부의 추가 관세 발표가 임박한 가운데 통상...",
+    "_search_rank": 1,
+    "_search_keyword": "관세",
+    "_search_end": 20,
+    "_searched_at": "2026-10-01T09:49:58.926262+00:00",
+    "news_id": "620bddf7ffd2",
+    "keywords": [
+      "관세",
+      "반도체"
+    ],
+    "categories": [
+      "거시경제",
+      "반도체"
+    ]
+  },
+  "candidates": [
+    {
+      "cosine": 0.9374472363205244,
+      "article": {
+        "title": "산업장관 \"아쉽게 빠졌지만...美, 어떤 형태든 관세 15% 유지 입장 밝혔...",
+        "url": "http://www.wowtv.co.kr/NewsCenter/News/Read?articleId=A202610010017&t=NN",
+        "naver_url": "https://n.news.naver.com/mnews/article/215/0001267796?sid=101",
+        "source": "wowtv.co.kr",
+        "published_at": "2026-09-30T22:04:00Z",
+        "description": "도널드 트럼프 미국 행정부의 추가 관세 발표가 임박한 가운데 정부가 미국 측으로부터 한국산 제품에 대한 관세율을 기존 합의선인 15% 이내로 유지하겠다는 입장을 확인했다. 1일 통상 당국에 따르면 김정관...",
+        "_search_rank": 10,
+        "_search_keyword": "관세",
+        "_search_end": 20,
+        "_searched_at": "2026-10-01T09:49:58.926262+00:00",
+        "news_id": "536fbdf16226",
+        "keywords": [
+          "관세"
+        ],
+        "categories": [
+          "거시경제"
+        ]
+      }
+    },
+    {
+      "cosine": 0.9032660109765424,
+      "article": {
+        "title": "산업장관 “대미투자 통해 관세 15% 재확인…합의문 명시 빠져 아쉽다”",
+        "url": "https://biz.heraldcorp.com/article/10889694?ref=naver",
+        "naver_url": "https://n.news.naver.com/mnews/article/016/0002703993?sid=101",
+        "source": "biz.heraldcorp.com",
+        "published_at": "2026-09-30T21:49:00Z",
+        "description": "정부는 2000억달러 규모의 대미투자 프로젝트를 발표하면서 미국 측으로부터 기존 관세 합의선인 15%를 사수했다는 입장이다. 다만 아쉽게도 양국간 합의문에는 관세를 직접 명시하는 것이 빠졌다고 설명했다. 1일...",
+        "_search_rank": 8,
+        "_search_keyword": "관세",
+        "_search_end": 20,
+        "_searched_at": "2026-10-01T09:49:58.926262+00:00",
+        "news_id": "f916ac2a0a55",
+        "keywords": [
+          "관세"
+        ],
+        "categories": [
+          "거시경제"
+        ]
+      }
+    },
+    {
+      "cosine": 0.9333793884967543,
+      "article": {
+        "title": "김정관 산업부 장관, “미국, 관세 15% 수준 유지하겠다고 약속”",
+        "url": "http://www.kookje.co.kr/news2011/asp/newsbody.asp?code=0200&key=20261001.99099000007",
+        "naver_url": "https://n.news.naver.com/mnews/article/658/0000157152?sid=101",
+        "source": "kookje.co.kr",
+        "published_at": "2026-09-30T21:58:00Z",
+        "description": "미국이 추가 관세 발표를 서두르고 있는 가운데 우리 정부는 미국 측으로부터 기존 관세 합의선인 15%를 넘지 않겠다는 입장을 확인한 것으로 알려졌다. 1일 정치권 등에 따르면 김정관 산업통상부 장관은 최근...",
+        "_search_rank": 15,
+        "_search_keyword": "관세",
+        "_search_end": 20,
+        "_searched_at": "2026-10-01T09:49:58.926262+00:00",
+        "news_id": "2dd99ecfe3f3",
+        "keywords": [
+          "관세"
+        ],
+        "categories": [
+          "거시경제"
+        ]
+      }
+    },
+    {
+      "cosine": 0.9166533517171421,
+      "article": {
+        "title": "美무역수장 \"과잉생산 관세, 각국 상한선 고려\"…韓 '15%' 안 넘길듯",
+        "url": "https://www.newsis.com/view/NISX20260930_0003809056",
+        "naver_url": "https://n.news.naver.com/mnews/article/003/0014225022?sid=104",
+        "source": "newsis.com",
+        "published_at": "2026-09-30T09:03:00Z",
+        "description": "도널드 트럼프 미국 행정부가 무역법 제301조에 근거한 과잉생산 조사 결과에 따른 신규 관세를 부과할 때, 각국과의 무역 협정에 명시된 관세율 상한을 준수하겠다는 입장을 밝혔다. 한국에 적용될 총 관세율도 한미...",
+        "_search_rank": 17,
+        "_search_keyword": "관세",
+        "_search_end": 20,
+        "_searched_at": "2026-10-01T09:49:58.926262+00:00",
+        "news_id": "e7888302d3c4",
+        "keywords": [
+          "관세"
+        ],
+        "categories": [
+          "거시경제"
+        ]
+      }
+    }
+  ]
+}

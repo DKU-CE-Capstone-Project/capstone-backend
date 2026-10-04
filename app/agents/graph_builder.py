@@ -4,22 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.agents.filter_agent import _content_tokens, _overlap_coefficient
-from app.utils import make_news_id
-
-_FALLBACK_UNSPLASH = [
-    "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1526304640581-d334cdbbf45e?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1494412519320-aa613dfb7738?auto=format&fit=crop&w=520&q=80",
-    "https://images.unsplash.com/photo-1473341304170-971dccb5ac1e?auto=format&fit=crop&w=520&q=80",
-]
-
-
-def _distance(center: dict[str, Any], other: dict[str, Any]) -> int:
-    """1 if title-token overlap ≥ 0.4, otherwise 2."""
-    a = _content_tokens(center.get("title", ""))
-    b = _content_tokens(other.get("title", ""))
-    return 1 if _overlap_coefficient(a, b) >= 0.4 else 2
+from app.news_cards import to_news_card
 
 
 def _relevance_score(a: dict[str, Any], b: dict[str, Any]) -> float:
@@ -33,6 +18,8 @@ def build_graph(
     center: dict[str, Any],
     related: list[dict[str, Any]],
     include_distance: bool = True,
+    *,
+    scores: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """
     Build GraphResponse-compatible dict from a center article and related articles.
@@ -40,34 +27,34 @@ def build_graph(
     Args:
         center: Normalized article dict (must have news_id).
         related: List of normalized article dicts (may or may not have news_id).
-        include_distance: Whether to populate distance fields.
+        include_distance: Legacy flag; direct edges always have distance 1.
+        scores: Only caller-authorized scores; omitted for FREE/BASIC.
 
     Returns:
         Dict matching GraphResponse schema.
     """
-    center_id = center.get("news_id") or make_news_id(center.get("url", ""))
-    center_summary = center.get("title", "") or center.get("summary") or center.get("description", "")
-
+    center_card = to_news_card(center).model_dump()
+    center_id = center_card["news_id"]
     center_node = {
-        "news_id": center_id,
-        "title": center.get("title", ""),
-        "summary": center_summary[:200],
+        **center_card,
         "distance": 0,
         "is_center": True,
+        "relevance_score": None,
     }
 
     nodes: list[dict[str, Any]] = [center_node]
     edges: list[dict[str, Any]] = []
 
     for i, art in enumerate(related):
-        nid = art.get("news_id") or make_news_id(art.get("url", f"unknown-{i}"))
-        dist = _distance(center, art) if include_distance else 1
-        summary = art.get("title", "") or art.get("summary") or art.get("description", "")
+        card = to_news_card(art, i).model_dump()
+        nid = card["news_id"]
+        # Every selected article is directly connected to the center. Similarity
+        # is not a hop count; depth remains reserved for future multi-hop expansion.
+        dist = 1
 
         nodes.append({
-            "news_id": nid,
-            "title": art.get("title", ""),
-            "summary": summary[:200],
+            **card,
+            "relevance_score": (scores or {}).get(nid),
             "distance": dist,
             "is_center": False,
         })
