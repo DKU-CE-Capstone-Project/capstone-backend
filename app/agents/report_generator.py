@@ -118,13 +118,129 @@ async def generate_report(
     if not parsed:
         report = _dummy_report(title)
         report["rag_sources"] = rag_sources
+        report["is_fallback"] = True
         return report
 
     return {
+        "is_fallback": False,
         "title": parsed.get("title", f"{title[:30]} 리포트"),
         "summary": parsed.get("summary", ""),
         "event_analysis": parsed.get("event_analysis", ""),
         "market_impact": parsed.get("market_impact", ""),
         "risk_factors": parsed.get("risk_factors", []),
         "rag_sources": rag_sources,
+    }
+
+
+# ── 선택 기사 리포트 (뉴스맵: 여러 근거 기사 · 종목 영향 · 전략 입장) ───────────────
+
+SELECTION_PROMPT_VERSION = "selection-report-v1"
+_BODY_LIMIT = 4000  # 기사당 본문 상한(문자). 5건이어도 프롬프트가 과도하게 길어지지 않게 한다.
+_DIRECTIONS = {"up", "down", "mixed"}
+_ACTIONS = {"buy", "hold", "sell", "watch"}
+
+_SELECTION_PROMPT = """\
+아래는 사용자가 직접 고른 뉴스 {count}건이다. 이 기사들만 근거로 투자자를 위한 분석 리포트를 한국어로 작성해줘.
+반드시 다음 JSON 형식만 출력하고, 다른 텍스트는 쓰지 마.
+근거 기사(와 유사 과거 뉴스)에 없는 사실이나 종목은 만들어내지 마. 종목은 근거 기사에 이름이 나온 기업만 쓴다.
+direction은 기사 내용이 해당 종목에 주는 영향의 해석이며 가격 예측이 아니다. 판단할 수 없으면 그 종목을 넣지 마.
+
+{articles}
+{rag_block}
+출력 형식:
+{{
+  "title": "리포트 제목 (50자 이내)",
+  "summary": "핵심 요약 (200자 이내)",
+  "event_analysis": "사건 분석 (300자 이내)",
+  "market_impact": "시장 영향 분석 (300자 이내)",
+  "risk_factors": ["리스크1", "리스크2", "리스크3"],
+  "stock_impacts": [
+    {{"name": "기사에 나온 기업명", "ticker": "알면 종목코드, 모르면 빈 문자열",
+      "direction": "up|down|mixed", "action": "buy|hold|sell|watch", "comment": "한 문장 해석"}}
+  ],
+  "strategy": {{"stance": "전략 입장 (15자 이내)", "rationale": "근거 (150자 이내)",
+               "watchlist": ["관심 종목명"], "risk_warning": "주의 사항 (100자 이내)"}}
+}}
+"""
+
+
+def _article_block(index: int, article: dict[str, Any]) -> str:
+    body = (article.get("cleaned_content") or "")[:_BODY_LIMIT]
+    description = article.get("description") or article.get("summary") or ""
+    return (f"[기사 {index}] {article.get('title', '')}\n"
+            f"설명: {description}\n"
+            f"본문: {body or '(본문 없음 — 설명만 사용)'}\n")
+
+
+def _text(value: Any, limit: int) -> str:
+    return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def _stock_impacts(raw: Any, evidence_text: str) -> list[dict[str, str]]:
+    """근거 기사에 이름이 나온 기업만, 허용 값만 남긴다(모델 출력은 신뢰하지 않는다)."""
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = _text(item.get("name"), 40)
+        direction = item.get("direction")
+        if not name or name in seen or direction not in _DIRECTIONS or name not in evidence_text:
+            continue
+        ticker = _text(item.get("ticker"), 12)
+        action = item.get("action") if item.get("action") in _ACTIONS else "watch"
+        items.append({"name": name, "ticker": "" if ticker == name else ticker, "direction": direction,
+                      "action": action, "comment": _text(item.get("comment"), 200)})
+        seen.add(name)
+    return items[:6]
+
+
+def _strategy(raw: Any, evidence_text: str) -> dict[str, Any] | None:
+    if not isinstance(raw, dict) or not _text(raw.get("stance"), 30):
+        return None
+    watchlist = [name for name in (_text(n, 40) for n in raw.get("watchlist") or [] if isinstance(n, str))
+                 if name and name in evidence_text]
+    return {"stance": _text(raw.get("stance"), 30), "rationale": _text(raw.get("rationale"), 300),
+            "watchlist": list(dict.fromkeys(watchlist))[:6], "risk_warning": _text(raw.get("risk_warning"), 200)}
+
+
+async def generate_selection_report(articles: list[dict[str, Any]]) -> dict[str, Any]:
+    """사용자가 고른 기사 1~5건(본문 또는 설명)을 근거로 리포트·종목 영향·전략 입장을 한 번에 생성.
+
+    LLM 실패·파싱 실패 시 is_fallback=True 인 대체 결과(종목·전략 없음)를 돌려준다.
+    """
+    lead = articles[0]
+    rag_articles = await retrieve_rag_articles(lead, k=3)
+    chosen = {a.get("news_id") for a in articles}
+    rag_articles = [a for a in rag_articles if a.get("news_id") not in chosen]
+    rag_sources = [a.get("title", "") for a in rag_articles if a.get("title")]
+    if rag_sources:
+        print(f"[report] RAG grounded with {len(rag_sources)} similar articles")
+
+    prompt = _SELECTION_PROMPT.format(
+        count=len(articles),
+        articles="\n".join(_article_block(i, a) for i, a in enumerate(articles, 1)),
+        rag_block=_rag_block(rag_articles),
+    )
+    raw = await generate(prompt)
+    parsed = _extract_json(raw) if raw else None
+    if not parsed or not _text(parsed.get("summary"), 400):
+        return {**_dummy_report(lead.get("title", "")), "stock_impacts": [], "strategy": None,
+                "rag_sources": rag_sources, "is_fallback": True}
+
+    evidence_text = "\n".join(
+        f"{a.get('title', '')} {a.get('description') or a.get('summary') or ''} {a.get('cleaned_content') or ''}"
+        for a in articles
+    )
+    risks = [_text(r, 200) for r in parsed.get("risk_factors") or [] if _text(r, 200)]
+    return {
+        "title": _text(parsed.get("title"), 80) or f"{lead.get('title', '')[:30]} 리포트",
+        "summary": _text(parsed.get("summary"), 400),
+        "event_analysis": _text(parsed.get("event_analysis"), 600),
+        "market_impact": _text(parsed.get("market_impact"), 600),
+        "risk_factors": risks[:5],
+        "stock_impacts": _stock_impacts(parsed.get("stock_impacts"), evidence_text),
+        "strategy": _strategy(parsed.get("strategy"), evidence_text),
+        "rag_sources": rag_sources,
+        "is_fallback": False,
     }

@@ -34,6 +34,7 @@ async def create_strategy(body: StrategyCreateRequest) -> StrategyCreateResponse
 
     full_strategy = {
         "strategy_id": strategy_id,
+        "report_id": body.report_id,  # 리포트와의 연결 보존 (docs/10 § 5.3)
         "expected_return": strategy_data["expected_return"],
         "risk": strategy_data["risk"],
         "period": body.period,

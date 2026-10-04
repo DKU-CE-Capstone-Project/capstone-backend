@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ── 기존 (POST /analyze 호환 유지) ────────────────────────────────────────────
 
@@ -167,17 +167,55 @@ class RelatedKeywordsResponse(BaseModel):
 # ── /api/v1/reports ───────────────────────────────────────────────────────────
 
 class ReportCreateRequest(BaseModel):
-    news_id: str
+    """news_ids(1~5)가 있으면 선택 기사 비동기 경로(202), 없으면 기존 동기 경로(news_id, 201)."""
+
+    news_id: str | None = None
     related_news_ids: list[str] = []
+    news_ids: list[str] | None = Field(default=None, min_length=1, max_length=5)
     ticker_symbols: list[str] = []
     language: str = "ko"
     report_type: str = "investment"
+
+    @model_validator(mode="after")
+    def _one_path(self) -> ReportCreateRequest:
+        if self.news_ids is None and not self.news_id:
+            raise ValueError("news_id 또는 news_ids 중 하나가 필요합니다.")
+        if self.news_ids is not None:
+            self.news_ids = list(dict.fromkeys(i for i in self.news_ids if i))
+            if not self.news_ids:
+                raise ValueError("news_ids에 유효한 ID가 없습니다.")
+        return self
 
 
 class ReportCreateResponse(BaseModel):
     report_id: str
     status: Literal["pending", "processing", "completed", "failed"]
     created_at: str
+
+
+class ReportProgress(BaseModel):
+    done: int
+    total: int
+
+
+class StockImpact(BaseModel):
+    name: str
+    ticker: str = ""
+    direction: Literal["up", "down", "mixed"]  # 기사 영향 해석. 가격 예측이 아니다.
+    action: Literal["buy", "hold", "sell", "watch"]
+    comment: str = ""
+
+
+class ReportStrategy(BaseModel):
+    stance: str
+    rationale: str = ""
+    watchlist: list[str] = []
+    risk_warning: str = ""
+
+
+class ReportError(BaseModel):
+    code: str
+    message: str
 
 
 class ReportResponse(BaseModel):
@@ -193,6 +231,16 @@ class ReportResponse(BaseModel):
     # AI 에이전트 강화: RAG 근거(유사 과거 뉴스 제목) + 검증(critic) 결과
     rag_sources: list[str] = []
     verification: dict[str, Any] | None = None
+    # 선택 기사 비동기 경로 (docs/10 § 3.6). 기존 동기 리포트는 completed/done·빈 값.
+    status: Literal["pending", "processing", "completed", "failed"] = "completed"
+    stage: Literal["queued", "extracting", "analyzing", "strategy", "done"] = "done"
+    progress: ReportProgress | None = None
+    requested_news_ids: list[str] = []
+    stock_impacts: list[StockImpact] = []
+    strategy: ReportStrategy | None = None
+    is_fallback: bool = False
+    error: ReportError | None = None
+    updated_at: str = ""
 
 
 # ── /api/v1/strategies ────────────────────────────────────────────────────────
