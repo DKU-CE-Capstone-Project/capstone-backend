@@ -221,13 +221,13 @@ def test_related_and_graph_share_saved_pair_policy_expansion_and_shortage(monkey
 
     initial_related, initial_graph = request("related", False), request("graph", False)
     assert initial_related["selection"] == initial_graph["selection"] == {
-        "status": "expandable", "reason": None, "requested": requested, "returned": 0}
+        "status": "expandable", "reason": None, "requested": requested, "returned": 0, "excluded": 0}
     assert initial_related["related_news"] == [] and len(initial_graph["nodes"]) == 1
     assert calls == []
     related, graph = request("related", True), request("graph", True)
     assert len(calls) == 1
     assert related["selection"] == graph["selection"] == {
-        "status": "insufficient", "reason": "search_limit", "requested": requested, "returned": 1}
+        "status": "insufficient", "reason": "search_limit", "requested": requested, "returned": 1, "excluded": 0}
     assert [a["news_id"] for a in related["related_news"]] == [NEWSIS["article"]["news_id"]]
     assert [a["news_id"] for a in graph["nodes"][1:]] == [NEWSIS["article"]["news_id"]]
     assert "center_same_story" not in related and "same_story" not in graph["center_node"]

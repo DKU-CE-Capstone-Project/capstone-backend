@@ -47,6 +47,7 @@ class NewsMapResult:
     reason: str | None
     target: int
     stats: dict[str, Any] = field(default_factory=dict)
+    excluded: int = 0
 
 
 def display_target(limit: int, tier: str) -> int:
@@ -74,9 +75,10 @@ async def cached_pool(center: dict[str, Any]) -> list[dict[str, Any]]:
     return _pool_order(list(found.values()))
 
 
-def _initial_end(center: dict[str, Any], pool: list[dict[str, Any]], count: int) -> int:
+def _initial_end(center: dict[str, Any], pool: list[dict[str, Any]], count: int,
+                 exclude: set[str] = frozenset()) -> int:
     """Pool index after the first ``count`` unique candidates in search order."""
-    seen, taken = identity_keys(center), 0
+    seen, taken = identity_keys(center) | exclude, 0
     for index, article in enumerate(pool):
         keys = identity_keys(article)
         if keys & seen or not map_text(article):
@@ -167,19 +169,36 @@ class _Expansion:
         return original
 
 
+async def exclusion_keys(news_ids: list[str]) -> set[str]:
+    """Identity keys (ID and article URLs) of articles the caller already shows."""
+    keys: set[str] = set()
+    for news_id in news_ids:
+        keys.add(f"id:{news_id}")
+        article = await store.get_news(news_id)
+        if article:
+            keys |= identity_keys(article)
+    return keys
+
+
 async def build_news_map(
     center: dict[str, Any], *, target: int, min_relevance: float = 0.0, expand: bool = True,
+    exclude_ids: list[str] | None = None,
 ) -> NewsMapResult:
-    """Select up to ``target`` neighbours; never lowers the relevance gate to fill slots."""
+    """Select up to ``target`` neighbours; never lowers the relevance gate to fill slots.
+
+    ``exclude_ids`` are removed before selection (articles already on the caller's map,
+    so a child expansion or a re-search returns different articles or none).
+    """
     started = time.monotonic()
     stats: dict[str, Any] = {"pool": 0, "initial": 0, "search_steps": 0, "searches": 0, "search_cache_hits": 0,
                              "raw": 0, "raw_duplicates": 0, "filtered": 0, "rounds": 0}
     usage = track_usage()
-    selector = NewsMapSelector(center, min_relevance=min_relevance)
+    exclude = await exclusion_keys(exclude_ids or [])
+    selector = NewsMapSelector(center, min_relevance=min_relevance, exclude=exclude)
     pool = await cached_pool(center)
     stats["pool"] = len(pool)
     # The first round takes the first unique candidates in search order.
-    consumed = _initial_end(center, pool, settings.news_map_initial_candidates)
+    consumed = _initial_end(center, pool, settings.news_map_initial_candidates, exclude)
     # A failed first round has no valid result and propagates (HTTP 503).
     await selector.add(pool[:consumed], limit=settings.news_map_initial_candidates)
     stats["initial"] = selector.evaluated
@@ -229,7 +248,7 @@ async def build_news_map(
     stats.update(
         status=status, reason=reason or "-", target=target, evaluated=selector.evaluated,
         below_threshold=selector.below_threshold, entity_only=selector.entity_only, unconnected=selector.unconnected,
-        center_repeats=selector.center_repeats,
+        center_repeats=selector.center_repeats, excluded=len(selector.excluded),
         neighbour_repeats=selector.neighbour_repeats, withheld=selector.withheld,
         remaining=len(selector.remaining), selected=len(items), **usage,
         elapsed_ms=round((time.monotonic() - started) * 1000),
@@ -237,4 +256,4 @@ async def build_news_map(
     # Counts and the hashed article ID only: no titles, queries, keys or vectors.
     logger.info("news_map center=%s %s", article_id(center),
                 " ".join(f"{key}={value}" for key, value in stats.items()))
-    return NewsMapResult(items, status, reason, target, stats)
+    return NewsMapResult(items, status, reason, target, stats, excluded=len(selector.excluded))

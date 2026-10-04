@@ -81,6 +81,7 @@ class NewsMapSelection(BaseModel):
     reason: str | None = None
     requested: int
     returned: int
+    excluded: int = 0  # Caller-supplied exclude_ids that appeared among the candidates.
 
 
 class GraphNode(NewsMapCard):
@@ -149,6 +150,18 @@ class RecommendedKeyword(BaseModel):
 
 class RecommendedKeywordsResponse(BaseModel):
     keywords: list[RecommendedKeyword]
+
+
+class RelatedKeyword(BaseModel):
+    keyword: str
+    article_count: int  # Search articles carrying the keyword; 0 for recommended fill-ins.
+    source: Literal["articles", "recommended"]
+
+
+class RelatedKeywordsResponse(BaseModel):
+    query: str
+    keywords: list[RelatedKeyword]
+    article_total: int
 
 
 # ── /api/v1/reports ───────────────────────────────────────────────────────────
