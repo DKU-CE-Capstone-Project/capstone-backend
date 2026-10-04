@@ -164,17 +164,26 @@ NCP 요청은 `https://naverapihub.apigw.ntruss.com/search/v1/news`에 `X-NCP-AP
 | `GET /health` | 프로세스 생존 확인. MongoDB 실제 ping을 대신하지 않는다 |
 | `GET /ready` | MongoDB 실제 ping. 연결 실패 또는 필수 DB 비활성화 시 503 |
 | `GET /api/v1/keywords/recommended` | 추천 검색어 |
+| `GET /api/v1/keywords/related?q=` | 검색어별 연관 키워드 (검색 기사 키워드 빈도 집계 + 추천 목록 보충) |
 | `GET /api/v1/news/search`, `/cards` | 뉴스 카드·description·키워드·카테고리 |
 | `GET /api/v1/news/{id}/source` | 출처·description. 전체 본문은 반환하지 않음 |
 | `GET /api/v1/news/{id}/thumbnail`, `/graph`, `/related` | 썸네일·뉴스맵·연관 뉴스 |
 | `POST /api/v1/news/selections`, `GET /api/v1/news/{id}/relations` | `tier=PAID` 쿼리 조건의 선택 묶음·관계 점수. 사용자 인증은 아직 없음 |
-| `POST /api/v1/reports`, `GET /api/v1/reports/{id}` | 선택 기사 본문 추출·리포트 생성 및 조회 |
+| `POST /api/v1/reports`, `GET /api/v1/reports/{id}` | 선택 기사 본문 추출·리포트 생성 및 조회. `news_ids`(1~5)면 비동기(202 → `status`·`stage` 폴링), `news_id`면 기존 동기(201) |
 | `POST /api/v1/strategies`, `GET /api/v1/strategies/{id}` | 전략 생성 및 조회 |
 | `POST /jobs`, `GET /jobs/{id}` | 기존 NATS·Redis 작업 큐 |
 | `POST /analyze` | 기존 분석 호환 경로 |
 | `GET`·`DELETE /api/v1/session`, `POST /api/v1/session/mindmap/expand`·`collapse`, `DELETE /api/v1/session/mindmap` | 쿠키 기반 세션 식별·마인드맵 상태. 아래 「세션」 참고 |
 
 전체 요청·응답 형식은 [뉴스 세션 API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)와 해당 브랜치 실행 중인 `/docs`를 참고한다. `/health`는 실제 DB ping이 아니며 `/ready`가 이를 검사한다. 현재 프론트 `article-api`는 `/related?tier=FREE&expand=false` 결과를 먼저 서버 순서대로 표시하고, `expandable`이면 같은 중심으로 `expand=true`를 다시 요청한다. `/graph`로 보충하지 않는다. 주변 기사 선정만 제한적으로 재개했으며, 키워드맵 알고리즘·다단계 확장·세션 상태 연동은 계속 보류한다. NCP 인증·응답 오류는 안전한 메시지로 전달하며, 검색 오류를 mock 뉴스로 대체하지 않는다.
+
+## 뉴스맵 프로토타입 연결 계약 (2026-10-04)
+
+정본 econmind-docs `docs/10-newsmap-api-contract-draft.md`의 확정 결정(D1~D6)을 구현했다. 기존 v1 응답은 바꾸지 않고 필드·파라미터만 추가했다.
+
+- `/related?exclude_ids=`(최대 100): 맵에 이미 있는 기사를 선정 전에 후보에서 뺀다. 하위 펼치기·재검색은 같은 엔드포인트를 쓰고, 결과 0건도 정상(200)이다. `selection.excluded`는 후보 중 제외된 수.
+- `/keywords/related`: 검색 결과 20건의 `keywords`를 기사 수로 집계(2건 이상, 별칭 정규화, 검색어 제외). 부족분은 추천 목록으로 채우고 `source`로 구분한다. 추가 LLM 호출 없음. 검색 실패는 502.
+- `POST /reports {news_ids}`: `app/report_jobs.py`가 응답 후 같은 API 프로세스에서 처리한다. 상태는 Redis `report_job:{id}`(TTL 1시간, Redis 없으면 메모리). 모든 근거 본문을 Diffbot으로 추출(동시 2, 재시도 0)하고 1건 이상 추출되면 생성, 나머지는 `body_status=description_only`. LLM 1회로 리포트·`stock_impacts`·`strategy`를 받고, 근거에 이름이 없는 종목·허용되지 않은 값은 버린다. LLM 실패는 `is_fallback=true`이며 재사용하지 않는다. 완료본은 `reports`에 `schema_version=2`(`sections`·`evidence`·`reuse_key`)로 저장되고 같은 기사 집합(순서 무관)이면 200으로 재사용한다. 세션당 진행 중 1건(409). 최종 요청 한도·응답 코드는 M5(SEC-05) 담당과 확정한다.
 
 ## 세션 (쿠키 기반 사용자 식별)
 

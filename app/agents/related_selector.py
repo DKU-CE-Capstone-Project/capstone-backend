@@ -123,7 +123,8 @@ class RankedArticle:
 
 
 class NewsMapSelector:
-    def __init__(self, center: dict[str, Any], *, min_relevance: float = 0.0):
+    def __init__(self, center: dict[str, Any], *, min_relevance: float = 0.0,
+                 exclude: set[str] | None = None):
         self.center = center
         self.threshold = max(settings.news_map_min_relevance, min_relevance)
         self.remaining: list[RankedArticle] = []
@@ -136,6 +137,10 @@ class NewsMapSelector:
         self.entity_only = 0
         self.unconnected = 0
         self._seen = identity_keys(center)
+        # Articles already on the caller's map: never candidates, counted once each.
+        self._exclude = set(exclude or ())
+        self._seen |= self._exclude
+        self.excluded: set[str] = set()
         self._center_vector: list[float] | None = None
         self._center_tokens = keyword_tokens(center)
         self._center_evidence = event_evidence(center)
@@ -144,7 +149,10 @@ class NewsMapSelector:
         self._pairs: dict[tuple[str, str], float] = {}
 
     def is_new(self, article: dict[str, Any]) -> bool:
-        return not identity_keys(article) & self._seen
+        keys = identity_keys(article)
+        if keys & self._exclude:
+            self.excluded.add(article_id(article))
+        return not keys & self._seen
 
     async def add(self, candidates: list[dict[str, Any]], *, limit: int | None = None) -> int:
         """Evaluate up to ``limit`` new unique candidates, keeping the supplied order.
@@ -155,6 +163,8 @@ class NewsMapSelector:
         fresh, seen = [], set(self._seen)
         for article in candidates:
             keys = identity_keys(article)
+            if keys & self._exclude:
+                self.excluded.add(article_id(article))
             if keys & seen or not map_text(article):
                 continue
             if limit is not None and len(fresh) >= limit:
