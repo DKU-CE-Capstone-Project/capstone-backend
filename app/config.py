@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     diffbot_search_timeout_ms: int = Field(default=10000, ge=1000, le=30000)
     diffbot_search_concurrency: int = Field(default=3, ge=1, le=5)
     google_api_key: str = ""
+    openai_api_key: SecretStr = Field(default=SecretStr(""), validation_alias=AliasChoices("OPENAI_API_KEY", "OAI_KEY"))
     use_mock_news: bool = False
     # Gemini 텍스트 생성 기본값. Flex는 지연을 허용하는 저비용 처리 티어.
     gemini_model: str = "gemini-3.5-flash-lite"
@@ -97,6 +98,13 @@ class Settings(BaseSettings):
 
     # ── AI 에이전트 (RAG 그라운딩 + 검증) ────────────────────────────────
     embedding_model: str = "gemini-embedding-001"  # Gemini 임베딩 (768차원 요청, generate와 별도 쿼터)
+    # Existing embedding/MMR remains available; local Decision runs opt in.
+    news_map_selector: Literal["embedding", "decision"] = "embedding"
+    news_map_decision_timeout_seconds: float = Field(default=30, gt=0, le=60)
+    news_map_decision_total_timeout_seconds: float = Field(default=90, gt=0, le=180)
+    news_map_decision_concurrency: int = Field(default=4, ge=1, le=10)
+    news_map_decision_max_calls: int = Field(default=200, ge=1, le=500)
+    news_map_decision_cache_ttl_seconds: float = Field(default=3600, gt=0, le=86400)
     # News-map vectors are isolated from the existing 768d report RAG index.
     news_map_embedding_model: str = "gemini-embedding-001"
     news_map_embedding_dimensions: int = Field(default=768, ge=128, le=3072)

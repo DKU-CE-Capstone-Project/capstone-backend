@@ -21,6 +21,8 @@ from typing import Any
 from app import database, store
 from app.agents import news_fetcher
 from app.agents.article_embeddings import EmbeddingUnavailable, map_text, track_usage
+from app.agents.decision_client import DecisionClient, DecisionUnavailable
+from app.agents.decision_selector import DecisionNewsMapSelector
 from app.agents.naver_client import NaverNewsError
 from app.agents.related_candidates import cached_search, grounded_queries
 from app.agents.related_selector import (
@@ -100,7 +102,7 @@ def _latest_session(pool: list[dict[str, Any]], keyword: str) -> tuple[int, str]
 
 
 class _Expansion:
-    def __init__(self, center: dict[str, Any], selector: NewsMapSelector, stats: dict[str, Any]):
+    def __init__(self, center: dict[str, Any], selector: NewsMapSelector | DecisionNewsMapSelector, stats: dict[str, Any]):
         self.center = center
         self.selector = selector
         self.stats = stats
@@ -170,12 +172,28 @@ class _Expansion:
 async def build_news_map(
     center: dict[str, Any], *, target: int, min_relevance: float = 0.0, expand: bool = True,
 ) -> NewsMapResult:
+    if settings.news_map_selector == "decision":
+        async with DecisionClient() as client:
+            selector = DecisionNewsMapSelector(center, client, min_relevance=min_relevance)
+            return await _build_news_map(center, selector, target=target, expand=expand)
+    return await _build_news_map(center, NewsMapSelector(center, min_relevance=min_relevance),
+                                 target=target, expand=expand)
+
+
+async def _select(selector: NewsMapSelector | DecisionNewsMapSelector, target: int) -> list[RankedArticle]:
+    if isinstance(selector, DecisionNewsMapSelector):
+        return await selector.select(target)
+    return selector.select(target)
+
+
+async def _build_news_map(
+    center: dict[str, Any], selector: NewsMapSelector | DecisionNewsMapSelector, *, target: int, expand: bool,
+) -> NewsMapResult:
     """Select up to ``target`` neighbours; never lowers the relevance gate to fill slots."""
     started = time.monotonic()
     stats: dict[str, Any] = {"pool": 0, "initial": 0, "search_steps": 0, "searches": 0, "search_cache_hits": 0,
                              "raw": 0, "raw_duplicates": 0, "filtered": 0, "rounds": 0}
     usage = track_usage()
-    selector = NewsMapSelector(center, min_relevance=min_relevance)
     pool = await cached_pool(center)
     stats["pool"] = len(pool)
     # The first round takes the first unique candidates in search order.
@@ -184,7 +202,7 @@ async def build_news_map(
     await selector.add(pool[:consumed], limit=settings.news_map_initial_candidates)
     stats["initial"] = selector.evaluated
     stats["rounds"] = 1
-    items = selector.select(target)
+    items = await _select(selector, target)
     status, reason = (COMPLETE, None) if len(items) >= target else (INSUFFICIENT, None)
     expansion = _Expansion(center, selector, stats)
     steps = list(expansion.steps(pool, consumed))
@@ -210,7 +228,7 @@ async def build_news_map(
                     added = await selector.add(articles, limit=settings.news_map_max_candidates - selector.evaluated)
                     stats["rounds"] += 1
                     stats[f"added_{name}"] = stats.get(f"added_{name}", 0) + added
-                    items = selector.select(target)
+                    items = await _select(selector, target)
                     if len(items) >= target:
                         status, reason = COMPLETE, None
                         break
@@ -223,10 +241,13 @@ async def build_news_map(
             status, reason = PARTIAL, "search_failed"
         except EmbeddingUnavailable:
             status, reason = PARTIAL, "embedding_failed"
+        except DecisionUnavailable:
+            status, reason = PARTIAL, "decision_failed"
         except DatabasePersistenceError:
             status, reason = PARTIAL, "storage_failed"
         items = list(selector.selected)
     stats.update(
+        selector=settings.news_map_selector,
         status=status, reason=reason or "-", target=target, evaluated=selector.evaluated,
         below_threshold=selector.below_threshold, entity_only=selector.entity_only, unconnected=selector.unconnected,
         center_repeats=selector.center_repeats,
@@ -234,6 +255,8 @@ async def build_news_map(
         remaining=len(selector.remaining), selected=len(items), **usage,
         elapsed_ms=round((time.monotonic() - started) * 1000),
     )
+    if isinstance(selector, DecisionNewsMapSelector):
+        stats.update(selector.client.stats)
     # Counts and the hashed article ID only: no titles, queries, keys or vectors.
     logger.info("news_map center=%s %s", article_id(center),
                 " ".join(f"{key}={value}" for key, value in stats.items()))

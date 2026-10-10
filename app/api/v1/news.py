@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from app import store
 from app.agents import naver_categories
 from app.agents.article_embeddings import EmbeddingUnavailable
+from app.agents.decision_client import DecisionUnavailable
 from app.agents.filter_agent import _content_tokens
 from app.agents.graph_builder import _relevance_score, build_graph
 from app.agents.news_fetcher import fetch_naver_news_page, fetch_news
@@ -101,6 +102,11 @@ async def _news_map(
         raise HTTPException(
             status_code=503,
             detail="연관 기사 임베딩을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        ) from exc
+    except DecisionUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="연관 기사 판단 서비스를 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.",
         ) from exc
 
 
