@@ -1,7 +1,13 @@
 # EconMind Backend
 
 실시간 경제 뉴스 검색·뉴스맵·AI 리포트 API. FastAPI / Python 3.11 이상.
-프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 이 README는 **2026-10-01 로컬 `article-api` 브랜치**의 뉴스 경로와 뉴스맵 선정 설정을 설명한다. 같은 날 2차 작업 시작 커밋은 `0a462f8ba080f957e6855e3cb224b17007fd876d`이며 미커밋 변경 없이 시작했다. 결과 코드 커밋은 정본 `docs/99-verification.md`의 2026-10-01 기록에 남긴다. 기존 뉴스 세션 경로는 정본의 2026-09-21 병합 기록을 따르며, 이번 뉴스맵 변경은 로컬 구현·검증 범위다. [API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)의 과거 계약과 날짜별 추가 내용을 구분해 읽는다. 원격 반영·운영 배포는 수행하지 않았다.
+프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 이 README의 뉴스맵 품질·성능 검증 기록은 2026-10-01~02 로컬 작업을 설명하며, 아래 세션·소유권·요청 한도는 2026-10-10 변경 사항이다. [API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)의 과거 계약과 날짜별 추가 내용을 구분해 읽는다. 소스 병합과 실제 운영 배포는 별도로 확인해야 한다.
+
+## 세션·결과 접근과 사용량 제한 (2026-10-10)
+
+세션 쿠키는 서버가 발급해 Redis에 저장한 값만 수락한다. 세션 초기화 시 쿠키를 교체하고 API JSON에 세션 ID를 노출하지 않는다. 생성한 세션만 리포트·전략·작업 결과를 조회할 수 있다. 세션이 만료되거나 초기화되면 기존 결과를 조회할 수 없으며, 소유자 정보가 없는 기존 결과도 API에서 조회할 수 없다. 클라이언트는 쿠키를 자동 전송해야 한다.
+
+Redis의 원자적 카운터는 최근 1시간 동안 작업 제출 세션당 10건/전체 200건, 리포트 신규 생성 5건/전체 100건, 전략 생성 10건/전체 200건, 레거시 분석 10건/전체 200건으로 제한한다. 초과 시 429, Redis 장애 시 운영 기본값에서 503이다. 로컬 메모리 제한은 `SESSION_STORE_REQUIRED=false`를 명시한 단일 인스턴스 개발 전용이다. 로그인과 실제 구독 권한은 아직 없어 PAID 데모는 기본 차단한다. 뉴스 검색·뉴스맵에는 이 요청 한도가 아직 적용되지 않았으므로 운영 노출 시 별도 용량 검증과 제한이 필요하다.
 
 ## 뉴스 공급원 변경 이유
 
@@ -117,7 +123,7 @@
 - 주변 카드에 `same_story`(같은 소식 다른 보도 카드 목록, 발행 순)·`same_story_total`. `/related`는 `center_same_story`·`center_same_story_total`, `/graph`는 `center_node.same_story`를 쓴다. 묶인 카드는 기존 카드 필드(제목·설명·출처·발행 시각·원문 링크·썸네일·키워드·카테고리)만 있고 **점수·거리 필드가 없다.** 묶음은 주변 노드 수를 소비하지 않는다.
 - `selection`: `status`(`complete`·`insufficient`·`partial`·`expandable`), `reason`(`exhausted`·`candidate_limit`·`search_limit`·`no_source`·`timeout`·`search_failed`·`embedding_failed`·`storage_failed`), `requested`(요금제 적용 후 목표), `returned`.
 - 최초 라운드의 임베딩 실패는 503이다. 확장 중 검색 실패·시간 초과·확장 후보 임베딩 실패·저장 실패는 이미 확정된 최초 결과를 200 `partial`로 반환한다(1차의 502/503/504 오류 응답에서 변경).
-- FREE/BASIC 최대 3건·점수 `null`, PAID 요청 limit·중심 연관도 점수는 그대로다. `tier`는 쿼리이며 실제 구독 인증은 아니다.
+- FREE/BASIC 최대 3건·점수 `null`. PAID는 실제 구독 인증이 없으므로 기본 비활성화(`PAID_DEMO_ENABLED=false`)이며, 로컬 시연에서만 명시적으로 켜면 요청 limit·점수를 확인할 수 있다.
 
 ### 진단 로그
 
@@ -149,6 +155,8 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 | `MONGODB_REQUIRED` | 로컬 기본 `false`, 서버 `true`. 필수 저장 실패는 503 |
 | `USE_RAG`, `USE_CRITIC` | 유사 기사 근거 검색, 생성 리포트 검증 |
 | `CORS_ORIGINS` | 로컬은 `http://localhost:5173,http://127.0.0.1:5173` |
+| `SESSION_STORE_REQUIRED` | 기본 `true`: Redis 장애 시 세션·소유권 API는 503. 단일 인스턴스 로컬 개발에서만 `false` |
+| `PAID_DEMO_ENABLED` | 기본 `false`: 실제 결제 권한 검증 전 PAID 데모 경로 차단 |
 
 NCP 요청은 `https://naverapihub.apigw.ntruss.com/search/v1/news`에 `X-NCP-APIGW-API-KEY-ID` / `X-NCP-APIGW-API-KEY` 헤더를 보낸다. NAVER Developers 키와 구별한다. NCP에서 해당 애플리케이션의 뉴스 검색 API 사용 권한을 활성화해야 한다.
 응답의 `title`/`description` HTML을 제거하고, `pubDate`를 UTC로 정규화하며 `originallink`(언론사 출처)와 `link`(NAVER 본문 URL)를 모두 보존한다. `total_count`는 필터 전 공급원 전체 검색 수이며 현재 반환 카드 수가 아니다.
@@ -167,7 +175,7 @@ NCP 요청은 `https://naverapihub.apigw.ntruss.com/search/v1/news`에 `X-NCP-AP
 | `GET /api/v1/news/search`, `/cards` | 뉴스 카드·description·키워드·카테고리 |
 | `GET /api/v1/news/{id}/source` | 출처·description. 전체 본문은 반환하지 않음 |
 | `GET /api/v1/news/{id}/thumbnail`, `/graph`, `/related` | 썸네일·뉴스맵·연관 뉴스 |
-| `POST /api/v1/news/selections`, `GET /api/v1/news/{id}/relations` | `tier=PAID` 쿼리 조건의 선택 묶음·관계 점수. 사용자 인증은 아직 없음 |
+| `POST /api/v1/news/selections`, `GET /api/v1/news/{id}/relations` | `PAID_DEMO_ENABLED=true`인 로컬 시연에서만 `tier=PAID` 허용. 실제 구독 인증은 아직 없음 |
 | `POST /api/v1/reports`, `GET /api/v1/reports/{id}` | 선택 기사 본문 추출·리포트 생성 및 조회 |
 | `POST /api/v1/strategies`, `GET /api/v1/strategies/{id}` | 전략 생성 및 조회 |
 | `POST /jobs`, `GET /jobs/{id}` | 기존 NATS·Redis 작업 큐 |
@@ -180,19 +188,23 @@ NCP 요청은 `https://naverapihub.apigw.ntruss.com/search/v1/news`에 `X-NCP-AP
 
 로그인을 넣지 않기로 해서 계정으로 사용자를 구분할 수 없다. 대신 `econmind_sid` 쿠키를
 발급하고 세션 상태를 **Redis에 TTL과 함께** 저장한다. TTL 만료 = 세션 소멸 = 데이터 삭제다.
-Redis가 없거나 죽어 있으면 프로세스 로컬 dict로 폴백하지만, api를 여러 개로 띄우면
-세션이 인스턴스마다 갈리므로 운영에서는 Redis를 전제로 한다.
+기본 설정은 Redis 장애 시 세션·리포트·전략·작업 결과 API를 503으로 처리한다.
+단일 인스턴스 로컬 개발에서만 `SESSION_STORE_REQUIRED=false`로 메모리 저장을 허용한다.
+임의 쿠키 값이나 만료된 값은 새 세션으로 교체한다. 전체 세션 삭제는 쿠키를 교체한다.
+세션 ID는 JSON 응답에 포함하지 않는다. 리포트·전략·작업 결과는 생성 세션만 조회할 수 있으며,
+이 변경 전 저장된 소유자 정보 없는 결과는 API에서 조회할 수 없다.
 
 ```bash
-SESSION_TTL_SECONDS=86400      # 세션 수명(초). 접근할 때마다 갱신
+SESSION_TTL_SECONDS=86400      # 세션 수명(초). 상태 저장 시 갱신
+SESSION_STORE_REQUIRED=true   # Redis 장애 시 503
 SESSION_COOKIE_SECURE=false    # HTTPS로 서비스할 때 true
 SESSION_COOKIE_SAMESITE=lax    # 프론트와 API가 다른 출처면 none(+secure=true)
 ```
 
 | 메서드 / 경로 | 역할 |
 |---|---|
-| `GET /api/v1/session` | 세션 id + 마인드맵 상태 조회 (쿠키 없으면 발급) |
-| `DELETE /api/v1/session` | 세션 전체 초기화 |
+| `GET /api/v1/session` | 마인드맵 상태 조회 (쿠키 없으면 발급) |
+| `DELETE /api/v1/session` | 세션 전체 초기화 및 쿠키 교체 |
 | `POST /api/v1/session/mindmap/expand` | 펼친 노드를 세션에 기록 |
 | `POST /api/v1/session/mindmap/collapse` | 펼친 노드 기록 해제 |
 | `DELETE /api/v1/session/mindmap` | 마인드맵 상태만 초기화 |

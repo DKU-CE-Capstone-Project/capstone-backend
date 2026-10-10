@@ -27,9 +27,9 @@ async def test_worker_failure_hides_exception(monkeypatch, capsys) -> None:
     monkeypatch.setattr(worker, "run_analysis", fail)
     monkeypatch.setattr(worker, "set_job", record)
 
-    await worker._process({"job_id": "test-job", "keyword": "example"})
+    await worker._process({"job_id": "test-job", "keyword": "example", "owner_sid": "owner"})
 
-    assert stored == [{"status": "error", "keyword": "example", "error": PUBLIC_JOB_ERROR}]
+    assert stored == [{"status": "error", "keyword": "example", "owner_sid": "owner", "error": PUBLIC_JOB_ERROR}]
     output = capsys.readouterr().out
     assert "type=RuntimeError" in output
     assert secret not in output
@@ -52,28 +52,36 @@ async def test_worker_success_keeps_result(monkeypatch) -> None:
     monkeypatch.setattr(worker, "run_analysis", succeed)
     monkeypatch.setattr(worker, "set_job", record)
 
-    await worker._process({"job_id": "test-job", "keyword": "example"})
+    await worker._process({"job_id": "test-job", "keyword": "example", "owner_sid": "owner"})
 
-    assert stored == [{"status": "done", "keyword": "example", "result": {"answer": "ok"}}]
+    assert stored == [{"status": "done", "keyword": "example", "owner_sid": "owner", "result": {"answer": "ok"}}]
 
 
 def test_job_api_redacts_existing_error_records(monkeypatch) -> None:
+    client = TestClient(app)
+    client.get("/api/v1/session")
+    owner_sid = client.cookies.get("econmind_sid")
+
     async def old_record(_job_id):
-        return {"status": "error", "keyword": "example", "error": "FAKE_SECRET_TOKEN_123"}
+        return {"status": "error", "keyword": "example", "owner_sid": owner_sid, "error": "FAKE_SECRET_TOKEN_123"}
 
     monkeypatch.setattr(jobs, "get_job", old_record)
-    response = TestClient(app).get("/jobs/test-job")
+    response = client.get("/jobs/test-job")
 
     assert response.status_code == 200
     assert response.json() == {"status": "error", "keyword": "example", "error": PUBLIC_JOB_ERROR}
 
 
 def test_job_api_preserves_success_records(monkeypatch) -> None:
+    client = TestClient(app)
+    client.get("/api/v1/session")
+    owner_sid = client.cookies.get("econmind_sid")
+
     async def done_record(_job_id):
-        return {"status": "done", "keyword": "example", "result": {"answer": "ok"}}
+        return {"status": "done", "keyword": "example", "owner_sid": owner_sid, "result": {"answer": "ok"}}
 
     monkeypatch.setattr(jobs, "get_job", done_record)
-    response = TestClient(app).get("/jobs/test-job")
+    response = client.get("/jobs/test-job")
 
     assert response.status_code == 200
     assert response.json() == {"status": "done", "keyword": "example", "result": {"answer": "ok"}}

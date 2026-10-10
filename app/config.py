@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     nats_url: str = "nats://localhost:4222"
     redis_url: str = "redis://localhost:6379/0"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # PAID is a demo query option until real server-side entitlement exists.
+    paid_demo_enabled: bool = False
 
     # demo_mode: burst 부하 데모의 재현성 확보용.
     # 외부 API(GDELT 타임아웃/Gemini 쿼터) 변동을 제거하기 위해 mock 뉴스 + 고정 처리지연 사용.
@@ -79,6 +81,9 @@ class Settings(BaseSettings):
     # 심어 사용자별 마인드맵 상태를 분리한다(12주차 회의 결정).
     # 상태는 Redis에 TTL과 함께 저장되므로, 만료 = 세션 소멸 = 데이터 삭제다.
     session_ttl_seconds: int = 86400  # 24시간
+    # Shared session state must be available for identity-bearing routes.
+    # Tests and explicitly isolated local development may opt into memory storage.
+    session_store_required: bool = True
     # HTTPS로 서비스할 때 true. http로 접속하면 true일 때 쿠키가 아예 안 실린다.
     session_cookie_secure: bool = False
     # 프론트와 API가 다른 출처면 "none"(+secure=true) 필요. 같은 출처면 "lax"로 충분.

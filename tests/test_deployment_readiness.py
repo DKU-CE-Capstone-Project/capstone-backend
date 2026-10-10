@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import database
+from app import session as session_store
 from app.agents import article_metadata
 from app.config import settings
 from app.main import app
@@ -16,6 +17,19 @@ def test_readiness_uses_actual_ping(monkeypatch, connected):
     monkeypatch.setattr(database, "ping", ping)
     response = TestClient(app).get("/ready")
     assert response.status_code == (200 if connected else 503)
+
+
+def test_readiness_requires_shared_session_store(monkeypatch):
+    monkeypatch.setattr(settings, "session_store_required", True)
+    monkeypatch.setattr(settings, "use_mongodb", False)
+
+    async def unavailable():
+        return False
+
+    monkeypatch.setattr(session_store, "ping", unavailable)
+    response = TestClient(app).get("/ready")
+    assert response.status_code == 503
+    assert response.json()["redis"] == "unavailable"
 
 
 async def test_required_database_write_is_not_silently_ignored(monkeypatch):

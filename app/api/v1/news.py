@@ -35,6 +35,11 @@ from app.utils import cache_articles, tier_ok
 
 router = APIRouter()
 
+
+def _check_demo_tier(tier: str) -> None:
+    if tier == "PAID" and not settings.paid_demo_enabled:
+        raise HTTPException(status_code=403, detail="PAID 데모 기능이 비활성화되었습니다.")
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 async def _fetch_and_cache(keyword: str) -> list[dict[str, Any]]:
@@ -183,6 +188,7 @@ async def get_graph(
     expand: bool = Query(default=True, description="false면 최초 후보만 평가하고 확장 가능 여부를 반환"),
 ) -> GraphResponse:
     """마인드맵 데이터를 반환합니다."""
+    _check_demo_tier(tier)
     center = await store.get_news(news_id)
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
@@ -215,6 +221,7 @@ async def get_related(
     반복 보도는 표시에서 제외하며 묶음 목록이나 건수를 반환하지 않습니다.
     응답 순서는 다양성 선정 순서이며 점수는 중심과의 연관도입니다.
     """
+    _check_demo_tier(tier)
     center = await store.get_news(news_id)
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
@@ -243,6 +250,7 @@ async def create_selection(
     tier: str = Query(default="FREE", pattern="^(FREE|BASIC|PAID)$"),
 ) -> NewsSelectionResponse:
     """선택한 뉴스 카드 묶음을 저장합니다. (PAID 전용)"""
+    _check_demo_tier(tier)
     if not tier_ok(tier, "PAID"):
         raise HTTPException(status_code=403, detail="PAID 플랜이 필요합니다.")
 
@@ -254,9 +262,12 @@ async def create_selection(
 
     sid = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
+    # No read endpoint consumes this cache; cap retained receipts for the demo.
+    if len(store.selection_cache) >= 1000:
+        store.selection_cache.pop(next(iter(store.selection_cache)))
     store.selection_cache[sid] = {
         "selection_id": sid,
-        "news_ids": body.news_ids,
+        "news_ids": [item["news_id"] for item in selected],
         "selected_news": selected,
         "created_at": now,
     }
@@ -273,10 +284,11 @@ async def create_selection(
 @router.get("/{news_id}/relations", response_model=RelationsResponse)
 async def get_relations(
     news_id: str,
-    target_news_ids: str = Query(default="", description="콤마 구분 뉴스 ID 목록"),
+    target_news_ids: str = Query(default="", max_length=2579, description="콤마 구분 뉴스 ID 목록"),
     tier: str = Query(default="FREE", pattern="^(FREE|BASIC|PAID)$"),
 ) -> RelationsResponse:
     """뉴스 간 연관도 점수를 반환합니다. (PAID 전용)"""
+    _check_demo_tier(tier)
     if not tier_ok(tier, "PAID"):
         raise HTTPException(status_code=403, detail="PAID 플랜이 필요합니다.")
 
@@ -285,6 +297,8 @@ async def get_relations(
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
     targets = [t.strip() for t in target_news_ids.split(",") if t.strip()]
+    if len(targets) > 20 or any(len(t) > 128 for t in targets):
+        raise HTTPException(status_code=422, detail="대상 뉴스는 최대 20개, ID는 최대 128자까지 허용합니다.")
     relations: list[RelationScore] = []
 
     for tid in targets:

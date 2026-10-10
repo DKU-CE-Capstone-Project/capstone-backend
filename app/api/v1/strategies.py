@@ -4,24 +4,27 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app import database, store
 from app.agents.strategy_generator import generate_strategy
 from app.schemas import StrategyCreateRequest, StrategyCreateResponse, StrategyResponse
+from app.usage_limits import check_quota
 
 router = APIRouter()
 
 
 @router.post("", response_model=StrategyCreateResponse, status_code=201)
-async def create_strategy(body: StrategyCreateRequest) -> StrategyCreateResponse:
+async def create_strategy(body: StrategyCreateRequest, request: Request) -> StrategyCreateResponse:
     """리포트를 바탕으로 투자 전략을 생성합니다."""
     report = await store.get_report(body.report_id)
-    if not report:
+    if not report or report.get("owner_sid") != request.state.session_id:
         raise HTTPException(
             status_code=404,
             detail=f"report_id '{body.report_id}' not found. /api/v1/reports 먼저 호출하세요.",
         )
+
+    await check_quota(request.state.session_id, "strategies", per_session=10, global_limit=200)
 
     strategy_data = await generate_strategy(
         report_summary=report.get("summary", ""),
@@ -34,6 +37,7 @@ async def create_strategy(body: StrategyCreateRequest) -> StrategyCreateResponse
 
     full_strategy = {
         "strategy_id": strategy_id,
+        "owner_sid": request.state.session_id,
         "expected_return": strategy_data["expected_return"],
         "risk": strategy_data["risk"],
         "period": body.period,
@@ -52,9 +56,9 @@ async def create_strategy(body: StrategyCreateRequest) -> StrategyCreateResponse
 
 
 @router.get("/{strategy_id}", response_model=StrategyResponse)
-async def get_strategy(strategy_id: str) -> StrategyResponse:
+async def get_strategy(strategy_id: str, request: Request) -> StrategyResponse:
     """생성된 투자 전략 결과를 조회합니다."""
     strategy = await store.get_strategy(strategy_id)
-    if not strategy:
+    if not strategy or strategy.get("owner_sid") != request.state.session_id:
         raise HTTPException(status_code=404, detail=f"strategy_id '{strategy_id}' not found.")
     return StrategyResponse(**strategy)

@@ -9,7 +9,7 @@ from app.api.routes import router as legacy_router
 from app.api.v1 import jobs, keywords, news, reports, sessions, strategies
 from app.config import settings
 from app.database import DatabasePersistenceError
-from app.session import SESSION_COOKIE, new_session_id
+from app.session import SESSION_COOKIE, SessionStoreUnavailable, resolve
 
 # News-map diagnostics are aggregate counts only; uvicorn does not configure app loggers.
 _diagnostics = logging.getLogger("econmind")
@@ -36,16 +36,29 @@ async def persistence_error_handler(request, exc: DatabasePersistenceError):
     return JSONResponse(status_code=503, content={"detail": "데이터를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요."})
 
 
+@app.exception_handler(SessionStoreUnavailable)
+async def session_store_error_handler(request, exc: SessionStoreUnavailable):
+    return JSONResponse(status_code=503, content={"detail": "세션 저장소를 사용할 수 없습니다. 잠시 후 다시 시도해 주세요."})
+
+
 @app.get("/ready", tags=["system"])
 async def readiness():
     from app import database
+    from app import session as session_store
+
+    redis_ready = not settings.session_store_required or await session_store.ping()
 
     if not settings.use_mongodb:
-        return JSONResponse(status_code=503 if settings.mongodb_required else 200,
-                            content={"status": "error" if settings.mongodb_required else "ok", "mongodb": "off"})
+        ready = not settings.mongodb_required and redis_ready
+        return JSONResponse(status_code=200 if ready else 503,
+                            content={"status": "ok" if ready else "error", "mongodb": "off",
+                                     "redis": "on" if redis_ready else "unavailable"})
     connected = await database.ping()
-    return JSONResponse(status_code=200 if connected else 503,
-                        content={"status": "ok" if connected else "error", "mongodb": "on" if connected else "unavailable"})
+    ready = connected and redis_ready
+    return JSONResponse(status_code=200 if ready else 503,
+                        content={"status": "ok" if ready else "error",
+                                 "mongodb": "on" if connected else "unavailable",
+                                 "redis": "on" if redis_ready else "unavailable"})
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,18 +77,27 @@ app.add_middleware(
 # 모든 요청에 세션 id를 붙여 두면 각 엔드포인트는 request.state.session_id만 보면 된다.
 @app.middleware("http")
 async def session_cookie_middleware(request: Request, call_next):
-    sid = request.cookies.get(SESSION_COOKIE) or ""
-    is_new = not sid
-    if is_new:
-        sid = new_session_id()
+    # Only identity-bearing endpoints need Redis-backed sessions. Keep health,
+    # public news, and CORS preflights available during a session-store outage.
+    path = request.url.path
+    needs_session = request.method != "OPTIONS" and (
+        path.startswith(("/api/v1/session", "/api/v1/reports", "/api/v1/strategies", "/jobs/"))
+        or path in ("/jobs", "/analyze")
+    )
+    if not needs_session:
+        return await call_next(request)
+    try:
+        sid, is_new = await resolve(request.cookies.get(SESSION_COOKIE) or "")
+    except SessionStoreUnavailable:
+        return JSONResponse(status_code=503, content={"detail": "세션 저장소를 사용할 수 없습니다. 잠시 후 다시 시도해 주세요."})
     request.state.session_id = sid
 
     response = await call_next(request)
 
-    if is_new:
+    if is_new or getattr(request.state, "session_rotated", False):
         response.set_cookie(
             key=SESSION_COOKIE,
-            value=sid,
+            value=request.state.session_id,
             max_age=settings.session_ttl_seconds,
             httponly=True,          # JS에서 읽을 필요가 없다 (XSS로 세션 탈취 방지)
             samesite=settings.session_cookie_samesite,

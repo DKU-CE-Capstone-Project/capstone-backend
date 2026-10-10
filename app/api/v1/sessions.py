@@ -23,7 +23,6 @@ class NodeRequest(BaseModel):
 def _to_response(data: dict) -> SessionResponse:
     mindmap = data.get("mindmap") or {}
     return SessionResponse(
-        session_id=data.get("sid", ""),
         mindmap=MindmapState(
             center_news_id=mindmap.get("center_news_id", ""),
             expanded_news_ids=mindmap.get("expanded_news_ids", []),
@@ -37,7 +36,6 @@ def _to_response(data: dict) -> SessionResponse:
 async def read_session(request: Request) -> SessionResponse:
     """현재 세션의 마인드맵 상태를 반환합니다. 쿠키가 없으면 새로 발급됩니다."""
     data = await session_store.load(request.state.session_id)
-    data["sid"] = request.state.session_id
     return _to_response(data)
 
 
@@ -46,8 +44,9 @@ async def reset_session(request: Request) -> SessionResponse:
     """세션 데이터를 비웁니다. 마인드맵 상태가 함께 사라집니다."""
     sid = request.state.session_id
     await session_store.clear(sid)
-    data = await session_store.load(sid)
-    data["sid"] = sid
+    request.state.session_id = await session_store.issue()
+    request.state.session_rotated = True
+    data = await session_store.load(request.state.session_id)
     return _to_response(data)
 
 
