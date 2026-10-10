@@ -90,13 +90,25 @@ async def _naver_search_response(keyword: str, page: int, size: int, sort: str) 
                           total_count=result.total)
 
 
+_MAX_EXCLUDE_IDS = 100
+
+
+def _parse_exclude_ids(raw: str, center_id: str) -> list[str]:
+    """Comma-separated IDs, de-duplicated in order; the center is always excluded anyway."""
+    ids = list(dict.fromkeys(part.strip() for part in raw.split(",") if part.strip()))
+    if len(ids) > _MAX_EXCLUDE_IDS:
+        raise HTTPException(status_code=422, detail=f"exclude_ids는 최대 {_MAX_EXCLUDE_IDS}개까지 보낼 수 있습니다.")
+    return [news_id for news_id in ids if news_id != center_id]
+
+
 async def _news_map(
     center: dict[str, Any], limit: int, min_relevance: float = 0.0, tier: str = "FREE", expand: bool = True,
+    exclude_ids: list[str] | None = None,
 ) -> NewsMapResult:
     """/related and /graph share one selection, tier policy and failure contract."""
     try:
         return await build_news_map(center, target=display_target(limit, tier), min_relevance=min_relevance,
-                                    expand=expand)
+                                    expand=expand, exclude_ids=exclude_ids)
     except EmbeddingUnavailable as exc:
         # Without a complete first round there is no valid result to return.
         raise HTTPException(
@@ -112,7 +124,7 @@ async def _news_map(
 
 def _selection(result: NewsMapResult) -> NewsMapSelection:
     return NewsMapSelection(status=result.status, reason=result.reason, requested=result.target,
-                            returned=len(result.items))
+                            returned=len(result.items), excluded=result.excluded)
 
 
 # ── GET /search ───────────────────────────────────────────────────────────────
@@ -240,6 +252,7 @@ async def get_related(
     include_score: bool = Query(default=False),
     tier: str = Query(default="FREE", pattern="^(FREE|BASIC|PAID)$"),
     expand: bool = Query(default=True, description="false면 최초 후보만 평가하고 확장 가능 여부를 반환"),
+    exclude_ids: str = Query(default="", description="쉼표 구분 news_id(최대 100개). 맵에 이미 있는 기사를 후보에서 제외"),
 ) -> RelatedResponse:
     """
     연관 뉴스를 반환합니다.
@@ -247,14 +260,16 @@ async def get_related(
     모든 요금제는 같은 관련성 필터·반복 정보 제외·MMR을 수행합니다.
     반복 보도는 표시에서 제외하며 묶음 목록이나 건수를 반환하지 않습니다.
     응답 순서는 다양성 선정 순서이며 점수는 중심과의 연관도입니다.
+    exclude_ids의 기사는 선정 전에 후보에서 빠집니다(하위 펼치기·재검색). 결과 0건도 정상 응답입니다.
     """
     _check_demo_tier(tier)
+    excluded = _parse_exclude_ids(exclude_ids, news_id)
     center = await store.get_news(news_id)
     if not center:
         raise HTTPException(status_code=404, detail=f"news_id '{news_id}' not found.")
 
     is_paid = tier_ok(tier, "PAID")
-    result = await _news_map(center, limit, min_relevance, tier, expand)
+    result = await _news_map(center, limit, min_relevance, tier, expand, excluded)
 
     items: list[RelatedNewsItem] = []
     for i, item in enumerate(result.items):

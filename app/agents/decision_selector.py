@@ -23,22 +23,31 @@ from app.agents.related_selector import (
 
 
 class DecisionNewsMapSelector:
-    def __init__(self, center: dict[str, Any], client: DecisionClient, *, min_relevance: float = 0.0):
+    def __init__(self, center: dict[str, Any], client: DecisionClient, *, min_relevance: float = 0.0,
+                 exclude: set[str] | None = None):
         self.center, self.client, self.threshold = center, client, min_relevance
         self.remaining: list[RankedArticle] = []
         self.selected: list[RankedArticle] = []
         self.center_repeats = self.neighbour_repeats = self.withheld = 0
         self.evaluated = self.below_threshold = self.entity_only = self.unconnected = 0
         self._seen = identity_keys(center)
+        self._exclude = set(exclude or ())
+        self._seen |= self._exclude
+        self.excluded: set[str] = set()
         self._roles: dict[str, str] = {}
 
     def is_new(self, article: dict[str, Any]) -> bool:
-        return not identity_keys(article) & self._seen
+        keys = identity_keys(article)
+        if keys & self._exclude:
+            self.excluded.add(article_id(article))
+        return not keys & self._seen
 
     async def add(self, candidates: list[dict[str, Any]], *, limit: int | None = None) -> int:
         fresh, seen = [], set(self._seen)
         for article in candidates:
             keys = identity_keys(article)
+            if keys & self._exclude:
+                self.excluded.add(article_id(article))
             if keys & seen or not map_text(article):
                 continue
             if limit is not None and len(fresh) >= limit:
