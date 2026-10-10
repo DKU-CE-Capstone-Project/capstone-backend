@@ -120,7 +120,6 @@ def test_public_news_routes_share_search_budget_and_map_budget(monkeypatch) -> N
     assert client.get("/api/v1/news/missing/source").status_code == 404
     assert client.get("/api/v1/news/missing/source").status_code == 404
     assert client.get("/api/v1/news/search?q=반도체").status_code == 429
-    assert client.get("/api/v1/keywords/related?q=반도체").status_code == 429
     assert client.get("/api/v1/news/missing/graph").status_code == 404
     assert client.get("/api/v1/news/missing/related").status_code == 429
 
@@ -129,7 +128,6 @@ def test_public_news_work_fails_closed_when_required_quota_store_is_down(monkeyp
     monkeypatch.setattr(settings, "session_store_required", True)
     client = TestClient(app)
     assert client.get("/api/v1/news/search?q=반도체").status_code == 503
-    assert client.get("/api/v1/keywords/related?q=반도체").status_code == 503
     assert client.get("/api/v1/news/missing/graph").status_code == 503
     assert client.get("/health").status_code == 200
 

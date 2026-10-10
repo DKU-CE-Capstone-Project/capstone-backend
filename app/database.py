@@ -423,61 +423,18 @@ async def news_candidates(keyword: str, limit: int) -> list[dict[str, Any]]:
         return []
 
 
-# ── reports schema_version 2 (econmind-docs docs/10 § 5.1) ─────────────────────
-# 선택 기사 리포트는 sections·evidence 로 묶어 저장하고, 읽을 때 API 의 평탄한 필드로 되돌린다.
-# schema_version 이 없는 기존 문서(동기 경로)는 앱 형태 그대로라 변환하지 않는다.
-_SECTION_FIELDS = ("summary", "event_analysis", "market_impact", "risk_factors")
-
-
-def report_doc_from_result(report: dict[str, Any]) -> dict[str, Any]:
-    doc = {k: v for k, v in report.items() if k not in _SECTION_FIELDS and k != "evidence_news"}
-    doc["schema_version"] = 2
-    doc["sections"] = {k: report.get(k, [] if k == "risk_factors" else "") for k in _SECTION_FIELDS}
-    doc["evidence"] = report.get("evidence_news", [])
-    doc["source_news_ids"] = report.get("requested_news_ids", [])
-    doc["created_by"] = "system"
-    for field in ("created_at", "updated_at"):
-        if isinstance(doc.get(field), str):
-            doc[field] = _parse_dt(doc[field]) or doc[field]
-    return doc
-
-
-def report_from_doc(doc: dict[str, Any]) -> dict[str, Any]:
-    if doc.get("schema_version") != 2:
-        return doc
-    report = {k: v for k, v in doc.items()
-              if k not in ("sections", "evidence", "source_news_ids", "schema_version", "created_by", "reuse_key")}
-    report.update(doc.get("sections") or {})
-    report["evidence_news"] = doc.get("evidence", [])
-    report["requested_news_ids"] = doc.get("source_news_ids", [])
-    for field in ("created_at", "updated_at"):
-        if isinstance(report.get(field), datetime):
-            report[field] = _iso_z(report[field])
-    return report
-
-
 async def get_report(report_id: str) -> dict[str, Any] | None:
-    """report_id 로 조회. 기존 문서는 앱 형태 그대로, schema_version 2 는 평탄화해 돌려준다."""
+    """report_id 로 조회. reports 는 앱 형태 그대로 저장되므로 변환이 필요 없다.
+
+    (설계 형태로 옮기는 건 작업범위 3 잔여분이다 — validator 가 아직 warn 인 이유)
+    """
     db = _get_db()
     if db is None:
         return None
     try:
-        doc = await db[REPORTS].find_one({"report_id": report_id}, {"_id": 0})
+        return await db[REPORTS].find_one({"report_id": report_id}, {"_id": 0})
     except Exception:  # noqa: BLE001
         return None
-    return report_from_doc(doc) if doc else None
-
-
-async def find_report_id_by_reuse_key(reuse_key: str) -> str | None:
-    """같은 근거·옵션의 완료된(대체 결과가 아닌) 리포트 id. 재시작 후에도 재사용된다."""
-    db = _get_db()
-    if db is None:
-        return None
-    try:
-        doc = await db[REPORTS].find_one({"reuse_key": reuse_key, "is_fallback": False}, {"report_id": 1})
-    except Exception:  # noqa: BLE001
-        return None
-    return doc.get("report_id") if doc else None
 
 
 async def get_strategy(strategy_id: str) -> dict[str, Any] | None:

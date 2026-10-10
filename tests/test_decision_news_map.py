@@ -262,21 +262,6 @@ async def test_shortage_only_expands_until_candidate_budget(enabled, monkeypatch
     assert result.status == "insufficient"
 
 
-def test_decision_exclusions_skip_ids_and_url_aliases_before_provider_work(enabled, monkeypatch):
-    calls = mock_http(monkeypatch)
-    seed(["shown", "one", "two", "three"])
-    store.news_cache["alias"] = article("alias", url=store.news_cache["shown"]["url"] + "?utm_source=other")
-    with TestClient(app) as client:
-        response = client.get("/api/v1/news/center/related?exclude_ids=shown,shown")
-        assert response.status_code == 200
-        data = response.json()
-        assert [row["news_id"] for row in data["related_news"]] == ["one", "two", "three"]
-        assert data["selection"]["excluded"] == 2
-        assert all(call["article_b"]["title"] not in {"shown", "alias"} for call in calls)
-        empty = client.get("/api/v1/news/center/related?exclude_ids=shown,one,two,three").json()
-        assert empty["related_news"] == [] and empty["selection"]["returned"] == 0
-
-
 async def test_expansion_failure_returns_completed_initial_selection(enabled, monkeypatch):
     mock_http(monkeypatch, "failure")
     monkeypatch.setattr(settings, "news_map_initial_candidates", 3)

@@ -5,8 +5,8 @@ import socket
 import pytest
 from pydantic import SecretStr
 
-from app import report_jobs, store, usage_limits
 from app import session as session_store
+from app import store, usage_limits
 from app.agents import (
     article_embeddings,
     article_metadata,
@@ -68,12 +68,9 @@ def offline_settings(monkeypatch):
     ):
         cache.clear()
     session_store._memory_store.clear()
-    report_jobs.reset_memory()
     usage_limits._memory.clear()
     monkeypatch.setattr(session_store, "_redis", None)
     monkeypatch.setattr(session_store, "_redis_disabled", True)
-    monkeypatch.setattr(report_jobs, "_redis", None)
-    monkeypatch.setattr(report_jobs, "_redis_disabled", True)
     yield
     article_metadata._cache.clear()
     article_embeddings._cache.clear()
