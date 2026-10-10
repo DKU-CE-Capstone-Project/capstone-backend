@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
+
+ResourceId = Annotated[str, StringConstraints(min_length=1, max_length=128)]
+Ticker = Annotated[str, StringConstraints(min_length=1, max_length=32)]
 
 # ── 기존 (POST /analyze 호환 유지) ────────────────────────────────────────────
 
@@ -115,8 +118,8 @@ class RelatedResponse(BaseModel):
 # ── /api/v1/news/selections ───────────────────────────────────────────────────
 
 class NewsSelectionRequest(BaseModel):
-    news_ids: list[str] = Field(min_length=1)
-    selection_type: str = "report_source"
+    news_ids: list[ResourceId] = Field(min_length=1, max_length=20)
+    selection_type: str = Field(default="report_source", max_length=32)
 
 
 class NewsSelectionResponse(BaseModel):
@@ -154,11 +157,11 @@ class RecommendedKeywordsResponse(BaseModel):
 # ── /api/v1/reports ───────────────────────────────────────────────────────────
 
 class ReportCreateRequest(BaseModel):
-    news_id: str
-    related_news_ids: list[str] = []
-    ticker_symbols: list[str] = []
-    language: str = "ko"
-    report_type: str = "investment"
+    news_id: str = Field(min_length=1, max_length=128)
+    related_news_ids: list[ResourceId] = Field(default_factory=list, max_length=20)
+    ticker_symbols: list[Ticker] = Field(default_factory=list, max_length=20)
+    language: str = Field(default="ko", max_length=10)
+    report_type: str = Field(default="investment", max_length=32)
 
 
 class ReportCreateResponse(BaseModel):
@@ -226,6 +229,5 @@ class MindmapState(BaseModel):
 
 
 class SessionResponse(BaseModel):
-    session_id: str
     mindmap: MindmapState
     viewed_news_ids: list[str] = Field(default_factory=list)

@@ -14,17 +14,18 @@ from __future__ import annotations
 import json
 import uuid
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from app.job_store import PUBLIC_JOB_ERROR, get_job, set_job
 from app.messaging.nats_client import publish_job
+from app.usage_limits import check_quota
 
 router = APIRouter()
 
 
 class JobCreateRequest(BaseModel):
-    keyword: str
+    keyword: str = Field(min_length=1, max_length=100)
 
 
 class JobCreateResponse(BaseModel):
@@ -33,20 +34,23 @@ class JobCreateResponse(BaseModel):
 
 
 @router.post("", response_model=JobCreateResponse, status_code=202)
-async def create_job(body: JobCreateRequest) -> JobCreateResponse:
+async def create_job(body: JobCreateRequest, request: Request) -> JobCreateResponse:
     """분석 job을 큐에 넣고 즉시 job_id를 반환한다 (202 Accepted)."""
+    await check_quota(request.state.session_id, "jobs", per_session=10, global_limit=200)
     job_id = str(uuid.uuid4())
-    await set_job(job_id, {"status": "queued", "keyword": body.keyword})
-    await publish_job(json.dumps({"job_id": job_id, "keyword": body.keyword}).encode())
+    owner_sid = request.state.session_id
+    await set_job(job_id, {"status": "queued", "keyword": body.keyword, "owner_sid": owner_sid})
+    await publish_job(json.dumps({"job_id": job_id, "keyword": body.keyword, "owner_sid": owner_sid}).encode())
     return JobCreateResponse(job_id=job_id, status="queued")
 
 
 @router.get("/{job_id}")
-async def read_job(job_id: str) -> dict:
+async def read_job(job_id: str, request: Request) -> dict:
     """job 상태/결과를 조회한다."""
     job = await get_job(job_id)
-    if not job:
+    if not job or job.get("owner_sid") != request.state.session_id:
         raise HTTPException(status_code=404, detail=f"job '{job_id}' not found")
+    public_job = {key: value for key, value in job.items() if key != "owner_sid"}
     if job.get("status") == "error":
-        return {**job, "error": PUBLIC_JOB_ERROR}
-    return job
+        return {**public_job, "error": PUBLIC_JOB_ERROR}
+    return public_job

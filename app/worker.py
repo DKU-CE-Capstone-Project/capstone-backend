@@ -24,6 +24,9 @@ async def _process(job: dict) -> None:
     """단일 job 처리: run_analysis → Redis 저장."""
     job_id = job.get("job_id", "")
     keyword = job.get("keyword", "")
+    owner_sid = job.get("owner_sid", "")
+    if not job_id or not owner_sid:
+        return
     try:
         # demo_mode: 고정 처리지연으로 burst 측정의 재현성 확보
         if settings.demo_mode:
@@ -33,11 +36,12 @@ async def _process(job: dict) -> None:
         await set_job(job_id, {
             "status": "done",
             "keyword": keyword,
+            "owner_sid": owner_sid,
             "result": json.loads(result.model_dump_json()),
         })
         print(f"[worker] done job={job_id}")
     except Exception as exc:  # noqa: BLE001
-        await set_job(job_id, {"status": "error", "keyword": keyword, "error": PUBLIC_JOB_ERROR})
+        await set_job(job_id, {"status": "error", "keyword": keyword, "owner_sid": owner_sid, "error": PUBLIC_JOB_ERROR})
         print(f"[worker] analysis failed job={job_id} type={type(exc).__name__}")
 
 

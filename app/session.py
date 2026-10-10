@@ -13,12 +13,13 @@
   - 이미 스택에 있는 컴포넌트라 새 의존성이 늘지 않는다 (app/job_store.py와 동일)
   - api를 여러 개로 띄워도 세션이 공유된다 (in-memory dict면 팟마다 갈린다)
 
-Redis가 없거나 죽어 있으면 프로세스 로컬 dict로 폴백한다. 단일 인스턴스에서는
-동작하지만 재시작 시 세션이 사라지므로, 운영에서는 Redis를 붙이는 것을 전제로 한다.
+Redis 장애 시 운영 기본값은 503이다. 단일 인스턴스 로컬 개발에서만 명시적으로
+메모리 폴백을 허용한다.
 """
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from typing import Any
@@ -33,6 +34,11 @@ _memory_store: dict[str, tuple[float, dict[str, Any]]] = {}
 
 _redis = None
 _redis_disabled = False
+_SID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
+
+
+class SessionStoreUnavailable(RuntimeError):
+    """The shared session store cannot establish the caller's identity."""
 
 
 def new_session_id() -> str:
@@ -50,10 +56,54 @@ def _client():
 
             _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
         except Exception as exc:  # noqa: BLE001
-            print(f"[session] Redis 초기화 실패 → in-memory 폴백: {type(exc).__name__}: {exc}")
+            print(f"[session] Redis 초기화 실패: {type(exc).__name__}")
             _redis_disabled = True
             return None
     return _redis
+
+
+def _require_store() -> None:
+    if settings.session_store_required:
+        raise SessionStoreUnavailable("Session store unavailable")
+
+
+async def ping() -> bool:
+    """Check the shared store used by all identity-bearing endpoints."""
+    client = _client()
+    if client is None:
+        return False
+    try:
+        return bool(await client.ping())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _existing(sid: str) -> dict[str, Any] | None:
+    client = _client()
+    if client is not None:
+        try:
+            raw = await client.get(f"{_KEY_PREFIX}{sid}")
+            return json.loads(raw) if raw else None
+        except Exception as exc:  # noqa: BLE001
+            print(f"[session] Redis get 실패: {type(exc).__name__}")
+    _require_store()
+    _prune_memory()
+    entry = _memory_store.get(sid)
+    return entry[1] if entry else None
+
+
+async def issue() -> str:
+    """Persist a server-created SID before sending it to a browser."""
+    sid = new_session_id()
+    await save(sid, _empty(sid))
+    return sid
+
+
+async def resolve(candidate: str) -> tuple[str, bool]:
+    """Accept only a live SID previously issued by this server."""
+    if _SID_PATTERN.fullmatch(candidate) and await _existing(candidate) is not None:
+        return candidate, False
+    return await issue(), True
 
 
 def _empty(sid: str) -> dict[str, Any]:
@@ -81,19 +131,7 @@ async def load(sid: str) -> dict[str, Any]:
     if not sid:
         return _empty("")
 
-    client = _client()
-    if client is not None:
-        try:
-            raw = await client.get(f"{_KEY_PREFIX}{sid}")
-            if raw:
-                return json.loads(raw)
-            return _empty(sid)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[session] Redis get 실패 → in-memory 폴백: {type(exc).__name__}: {exc}")
-
-    _prune_memory()
-    entry = _memory_store.get(sid)
-    return entry[1] if entry else _empty(sid)
+    return await _existing(sid) or _empty(sid)
 
 
 async def save(sid: str, data: dict[str, Any]) -> None:
@@ -112,8 +150,9 @@ async def save(sid: str, data: dict[str, Any]) -> None:
             )
             return
         except Exception as exc:  # noqa: BLE001
-            print(f"[session] Redis set 실패 → in-memory 폴백: {type(exc).__name__}: {exc}")
+            print(f"[session] Redis set 실패: {type(exc).__name__}")
 
+    _require_store()
     _prune_memory()
     _memory_store[sid] = (time.time() + ttl, data)
 
@@ -126,9 +165,11 @@ async def clear(sid: str) -> None:
     if client is not None:
         try:
             await client.delete(f"{_KEY_PREFIX}{sid}")
-            return
         except Exception as exc:  # noqa: BLE001
-            print(f"[session] Redis delete 실패 → in-memory 폴백: {type(exc).__name__}: {exc}")
+            print(f"[session] Redis delete 실패: {type(exc).__name__}")
+            _require_store()
+    else:
+        _require_store()
     _memory_store.pop(sid, None)
 
 

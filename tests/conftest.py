@@ -4,7 +4,8 @@ import socket
 
 import pytest
 
-from app import store
+from app import session as session_store
+from app import store, usage_limits
 from app.agents import (
     article_embeddings,
     article_metadata,
@@ -28,6 +29,8 @@ def offline_settings(monkeypatch):
         "diffbot_api_key": "",
         "use_mongodb": False,
         "mongodb_required": False,
+        "session_store_required": False,
+        "paid_demo_enabled": True,
         "mongodb_uri": "",
         "use_mock_news": True,
         "demo_mode": False,
@@ -59,6 +62,10 @@ def offline_settings(monkeypatch):
         store.report_index,
     ):
         cache.clear()
+    session_store._memory_store.clear()
+    usage_limits._memory.clear()
+    monkeypatch.setattr(session_store, "_redis", None)
+    monkeypatch.setattr(session_store, "_redis_disabled", True)
     yield
     article_metadata._cache.clear()
     article_embeddings._cache.clear()

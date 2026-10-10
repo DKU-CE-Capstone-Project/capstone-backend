@@ -269,12 +269,13 @@ def test_session_cookie_is_issued_and_reused() -> None:
     assert r1.status_code == 200
     assert SESSION_COOKIE in r1.cookies, "세션 쿠키가 발급되지 않았다"
 
-    sid1 = r1.json()["session_id"]
+    sid1 = fresh.cookies.get(SESSION_COOKIE)
     assert sid1
+    assert "session_id" not in r1.json()
 
     # 같은 클라이언트(=같은 브라우저)는 같은 세션을 유지한다
-    r2 = fresh.get("/api/v1/session")
-    assert r2.json()["session_id"] == sid1
+    fresh.get("/api/v1/session")
+    assert fresh.cookies.get(SESSION_COOKIE) == sid1
 
 
 def test_session_cookie_is_httponly() -> None:
@@ -307,8 +308,10 @@ def test_two_sessions_have_independent_mindmaps() -> None:
     user2 = TestClient(app)
 
     # 서로 다른 세션 id를 받는다
-    sid1 = user1.get("/api/v1/session").json()["session_id"]
-    sid2 = user2.get("/api/v1/session").json()["session_id"]
+    user1.get("/api/v1/session")
+    user2.get("/api/v1/session")
+    sid1 = user1.cookies.get("econmind_sid")
+    sid2 = user2.cookies.get("econmind_sid")
     assert sid1 != sid2, "두 클라이언트가 같은 세션을 공유하면 사용자 구분이 안 된다"
 
     # user1만 노드를 펼친다
