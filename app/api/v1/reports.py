@@ -6,9 +6,10 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi.responses import JSONResponse
 
-from app import database, store
+from app import database, report_jobs, store
 from app.agents import naver_categories
 from app.agents.critic import verify_report
 from app.agents.diffbot_client import extract_articles_with_diffbot
@@ -27,12 +28,57 @@ def _report_key(owner_sid: str, body: ReportCreateRequest) -> str:
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
 
 
-@router.post("", response_model=ReportCreateResponse, status_code=201)
-async def create_report(body: ReportCreateRequest, request: Request) -> ReportCreateResponse:
+async def _create_selection_report(
+    body: ReportCreateRequest, request: Request, background: BackgroundTasks,
+) -> JSONResponse:
+    """news_ids 경로: 202 + 백그라운드 생성. 같은 입력의 완료 결과는 200으로 재사용한다."""
+    news_ids = body.news_ids or []
+    missing = [nid for nid in news_ids if not await store.get_news(nid)]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"news_id '{missing[0]}' not found.")
+
+    session_id = request.state.session_id
+    key = report_jobs.reuse_key(news_ids, body.language, body.report_type, owner_sid=session_id)
+    done = await report_jobs.completed_report_id(key)
+    if done:
+        report = await store.get_report(done)
+        return JSONResponse(status_code=200, content=ReportCreateResponse(
+            report_id=done, status="completed", created_at=(report or {}).get("created_at", "")).model_dump())
+    running = await report_jobs.running_report_id(key)
+    if running:
+        state = await report_jobs.get_state(running) or {}
+        return JSONResponse(status_code=202, content=ReportCreateResponse(
+            report_id=running, status=state.get("status", "pending"), created_at=state.get("created_at", "")
+        ).model_dump())
+
+    active = await report_jobs.active_report_id(session_id)
+    if active:
+        raise HTTPException(status_code=409, detail={
+            "message": "진행 중인 리포트가 있습니다. 완료된 뒤 다시 요청해 주세요.", "report_id": active})
+
+    await check_quota(session_id, "reports", per_session=5, global_limit=100)
+    state = await report_jobs.create(news_ids, session_id=session_id, key=key)
+    background.add_task(report_jobs.run, state, session_id=session_id, key=key,
+                        language=body.language, report_type=body.report_type)
+    return JSONResponse(status_code=202, content=ReportCreateResponse(
+        report_id=state["report_id"], status="pending", created_at=state["created_at"]).model_dump())
+
+
+@router.post(
+    "", response_model=ReportCreateResponse, status_code=201,
+    responses={200: {"model": ReportCreateResponse}, 202: {"model": ReportCreateResponse}, 409: {}},
+)
+async def create_report(
+    body: ReportCreateRequest, request: Request, background: BackgroundTasks,
+) -> ReportCreateResponse | JSONResponse:
     """선택한 뉴스를 기반으로 AI 투자 분석 리포트를 생성합니다.
 
-    같은 뉴스(+연관셋)에 대한 리포트가 이미 있으면 LLM 재호출 없이 재사용합니다(캐싱).
+    - news_ids(1~5): 선택 기사 비동기 생성. 202 후 GET /reports/{id}로 status·stage를 폴링합니다.
+      같은 기사 집합·옵션의 완료 결과가 있으면 200으로 재사용합니다. 세션당 진행 중 작업은 1건(409).
+    - news_id(+related_news_ids): 기존 동기 생성(201). 같은 뉴스(+연관셋)는 캐시를 재사용합니다.
     """
+    if body.news_ids is not None:
+        return await _create_selection_report(body, request, background)
     center = await store.get_news(body.news_id)
     if not center:
         raise HTTPException(
@@ -108,10 +154,18 @@ async def create_report(body: ReportCreateRequest, request: Request) -> ReportCr
         ],
         "risk_factors": report_data["risk_factors"],
         "rag_sources": report_data.get("rag_sources", []),
+        "is_fallback": report_data.get("is_fallback", False),
         "verification": verification,
         "created_at": now,
     }
-    await database.save_report(full_report)  # MongoDB write-through (use_mongodb 시)
+    # MongoDB write-through (use_mongodb 시). 선택 기사 경로와 같은 schema_version 2 문서로 저장한다.
+    await database.save_report(database.report_doc_from_result({
+        **full_report,
+        "requested_news_ids": [body.news_id, *related_ids],
+        "report_type": body.report_type,
+        "language": body.language,
+        "updated_at": now,
+    }))
     store.report_cache[report_id] = full_report
     store.report_index[cache_key] = report_id
 
@@ -124,7 +178,18 @@ async def create_report(body: ReportCreateRequest, request: Request) -> ReportCr
 
 @router.get("/{report_id}", response_model=ReportResponse)
 async def get_report(report_id: str, request: Request) -> ReportResponse:
-    """생성된 AI 리포트 결과를 조회합니다."""
+    """Only the owner may read generation status or the completed report."""
+    state = await report_jobs.get_state(report_id)
+    if state and state.get("owner_sid") != request.state.session_id:
+        raise HTTPException(status_code=404, detail=f"report_id '{report_id}' not found.")
+    if state and state["status"] != "completed":
+        return ReportResponse(
+            report_id=report_id, title="", summary="", event_analysis="", market_impact="",
+            related_stocks=[], evidence_news=[], risk_factors=[], created_at=state.get("created_at", ""),
+            status=state["status"], stage=state["stage"], progress=state.get("progress"),
+            requested_news_ids=state.get("requested_news_ids", []), error=state.get("error"),
+            updated_at=state.get("updated_at", ""),
+        )
     report = await store.get_report(report_id)
     if not report or report.get("owner_sid") != request.state.session_id:
         raise HTTPException(status_code=404, detail=f"report_id '{report_id}' not found.")

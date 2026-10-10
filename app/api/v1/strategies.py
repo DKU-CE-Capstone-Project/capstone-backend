@@ -38,6 +38,7 @@ async def create_strategy(body: StrategyCreateRequest, request: Request) -> Stra
     full_strategy = {
         "strategy_id": strategy_id,
         "owner_sid": request.state.session_id,
+        "report_id": body.report_id,
         "expected_return": strategy_data["expected_return"],
         "risk": strategy_data["risk"],
         "period": body.period,
