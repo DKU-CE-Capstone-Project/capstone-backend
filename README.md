@@ -9,11 +9,12 @@
 
 Redis의 원자적 카운터는 최근 1시간 동안 작업 제출 세션당 10건/전체 200건, 리포트 신규 생성 5건/전체 100건, 전략 생성 10건/전체 200건, 레거시 분석 10건/전체 200건으로 제한한다. 공개 검색·카드·원문 분류는 연결 상대당 120건/전체 1200건, 뉴스맵 graph·related는 연결 상대당 30건/전체 300건으로 제한한다. 초과 시 429, Redis 장애 시 운영 기본값에서 503이다. 로컬 메모리 제한은 `SESSION_STORE_REQUIRED=false`를 명시한 단일 인스턴스 개발 전용이다. 공개 경로는 쿠키 세션을 요구하지 않으며 프록시 뒤에서는 연결 상대 한도가 공유될 수 있다. 서버 전체 한도가 우회 방지 상한이고, 수치는 운영 트래픽·공급자 예산에 맞춰 조정해야 한다. 로그인과 실제 구독 권한은 아직 없어 PAID 데모는 기본 차단한다. 쿠키 세션의 변경 요청에 명시적 Origin이 있으면 `CORS_ORIGINS`와 대조해 다른 출처를 거부한다.
 
-## 로컬 Decision API 뉴스맵 (2026-10-10)
+## Decision API 뉴스맵 main 병합 완료 (2026-10-10)
 
-최신 `main/8d659b8`에서 만든 로컬 `codex/decision-news-map-20261010` 작업이다.
-`GET /api/v1/news/{id}/related`와 `/graph`에서 다음 설정으로 Decision 선정을 사용한다.
-새 `/api/v2` 계약이나 DB 스키마를 적용하는 작업은 아니다.
+Decision API 기반 주변 기사 선정은 2026-10-10 [PR #13](https://github.com/DKU-CE-Capstone-Project/capstone-backend/pull/13)으로 **`main`에 병합 완료**됐다(`77fd704`). 시작 기준은 `main/8d659b8`이다.
+이후 프로토타입 v1 통합 PR #14는 [되돌림 PR #15](https://github.com/DKU-CE-Capstone-Project/capstone-backend/pull/15)로 취소했다(`5400996`). Decision API #13은 유지했고 코드 트리가 #14 병합 직전 `77fd704`와 같음을 확인했다.
+
+`GET /api/v1/news/{id}/related`와 `/graph`에서 `NEWS_MAP_SELECTOR=decision`으로 활성화한다. 기본값은 기존 `embedding`이다. 다음은 DB 없는 **로컬 실행 예시**이며, 코드 병합이 운영 환경의 Decision 활성화나 배포 완료를 뜻하지 않는다. 새 `/api/v2` 계약·DB 스키마·프로토타입 UI는 이번 최종 반영 범위에 포함하지 않는다.
 
 ```dotenv
 NEWS_MAP_SELECTOR=decision
@@ -48,6 +49,10 @@ Gemini 코사인 점수와 같은 척도가 아니며, `NEWS_MAP_MIN_RELEVANCE`�
 이 PC의 작업 공간은 기존 백엔드 프로젝트 가상환경을 `.venv`로 연결해 사용한다.
 실행: `.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8011`.
 일반 실행 기본값은 `NEWS_MAP_SELECTOR=embedding`이며 위 로컬 `.env`에서 decision을 활성화한다.
+
+**관찰 결과와 검증 범위:** JEV보다 같은 주제의 반복 보도를 주변 노드로 올리는 경향은 낮아졌지만, 관련성·유용성을 보수적으로 판단해 주변 뉴스가 부족하거나 0건인 경우가 늘었다. 사용자 관찰과 소표본 실험의 경향이며 전체 뉴스 품질 보장은 아니다. 질문·판정 임계값은 당시 OpenAI C 실험 값을 유지한다.
+
+2026-10-10 구현·되돌림 과정에서 로컬 `.venv/bin/python -m pytest -q` **381 passed, 3 skipped**(선택 MongoDB 검사), PR #13·#15의 Python 3.11 CI 성공을 확인했다. 저장 금값 기사 14건의 실제 OpenAI 연동에서 `/related`·`/graph` 200·동일 주변 3건, 최초 17회 호출·17,953 입력 토큰·약 8.1초, 후속 요청 17건 캐시 적중·추가 호출 0회를 확인했다. 새 뉴스 수집·DB 연결·운영 배포는 수행하지 않았다. 자세한 근거와 프로토타입 취소 상태는 정본 [2026-10-10 검증 기록](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/99-verification.md#2026-10-10-decision-api-main-병합과-프로토타입-통합-취소)을 따른다.
 
 ## 뉴스 공급원 변경 이유
 
