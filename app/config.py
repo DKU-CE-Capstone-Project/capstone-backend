@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     # PAID is a demo query option until real server-side entitlement exists.
     paid_demo_enabled: bool = False
+    # Initial hourly admission budgets for public provider-backed news routes.
+    # The global bucket remains effective when clients rotate addresses.
+    news_search_client_hourly_limit: int = Field(default=120, ge=1)
+    news_search_global_hourly_limit: int = Field(default=1200, ge=1)
+    news_map_client_hourly_limit: int = Field(default=30, ge=1)
+    news_map_global_hourly_limit: int = Field(default=300, ge=1)
 
     # demo_mode: burst 부하 데모의 재현성 확보용.
     # 외부 API(GDELT 타임아웃/Gemini 쿼터) 변동을 제거하기 위해 mock 뉴스 + 고정 처리지연 사용.

@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app import store
 from app.agents import naver_categories
@@ -31,9 +31,30 @@ from app.schemas import (
     SourceResponse,
     ThumbnailResponse,
 )
+from app.usage_limits import check_quota
 from app.utils import cache_articles, tier_ok
 
 router = APIRouter()
+
+
+async def _limit_search(request: Request) -> None:
+    # Use the connected peer, never an untrusted X-Forwarded-For header. A
+    # reverse proxy may make this a shared bucket; the global cap still holds.
+    peer = request.client.host if request.client else "unknown"
+    await check_quota(
+        peer, "news_search",
+        per_session=settings.news_search_client_hourly_limit,
+        global_limit=settings.news_search_global_hourly_limit,
+    )
+
+
+async def _limit_news_map(request: Request) -> None:
+    peer = request.client.host if request.client else "unknown"
+    await check_quota(
+        peer, "news_map",
+        per_session=settings.news_map_client_hourly_limit,
+        global_limit=settings.news_map_global_hourly_limit,
+    )
 
 
 def _check_demo_tier(tier: str) -> None:
@@ -90,7 +111,7 @@ def _selection(result: NewsMapResult) -> NewsMapSelection:
 
 # ── GET /search ───────────────────────────────────────────────────────────────
 
-@router.get("/search", response_model=SearchResponse)
+@router.get("/search", response_model=SearchResponse, dependencies=[Depends(_limit_search)])
 async def search_news(
     q: str = Query(min_length=1, max_length=100),
     page: int = Query(default=1, ge=1),
@@ -115,7 +136,7 @@ async def search_news(
 
 # ── GET /cards ────────────────────────────────────────────────────────────────
 
-@router.get("/cards", response_model=SearchResponse)
+@router.get("/cards", response_model=SearchResponse, dependencies=[Depends(_limit_search)])
 async def news_cards(
     keyword: str = Query(min_length=1, max_length=100),
     page: int = Query(default=1, ge=1),
@@ -146,7 +167,7 @@ async def get_thumbnail(news_id: str) -> ThumbnailResponse:
 
 # ── GET /{news_id}/source ─────────────────────────────────────────────────────
 
-@router.get("/{news_id}/source", response_model=SourceResponse)
+@router.get("/{news_id}/source", response_model=SourceResponse, dependencies=[Depends(_limit_search)])
 async def get_source(news_id: str) -> SourceResponse:
     """뉴스 원문 출처 및 링크를 반환합니다."""
     art = await store.get_news(news_id)
@@ -176,7 +197,7 @@ async def get_source(news_id: str) -> SourceResponse:
 
 # ── GET /{news_id}/graph ──────────────────────────────────────────────────────
 
-@router.get("/{news_id}/graph", response_model=GraphResponse)
+@router.get("/{news_id}/graph", response_model=GraphResponse, dependencies=[Depends(_limit_news_map)])
 async def get_graph(
     news_id: str,
     depth: int = Query(default=2, ge=1, le=3),
@@ -205,7 +226,7 @@ async def get_graph(
 
 # ── GET /{news_id}/related ────────────────────────────────────────────────────
 
-@router.get("/{news_id}/related", response_model=RelatedResponse)
+@router.get("/{news_id}/related", response_model=RelatedResponse, dependencies=[Depends(_limit_news_map)])
 async def get_related(
     news_id: str,
     limit: int = Query(default=10, ge=1, le=50),

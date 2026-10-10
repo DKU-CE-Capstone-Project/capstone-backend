@@ -107,3 +107,39 @@ def test_job_result_requires_owner_and_submission_is_limited(monkeypatch) -> Non
     for _ in range(9):
         assert owner.post("/jobs", json={"keyword": "반도체"}).status_code == 202
     assert owner.post("/jobs", json={"keyword": "반도체"}).status_code == 429
+
+
+def test_public_news_routes_share_search_budget_and_map_budget(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "news_search_client_hourly_limit", 2)
+    monkeypatch.setattr(settings, "news_search_global_hourly_limit", 100)
+    monkeypatch.setattr(settings, "news_map_client_hourly_limit", 1)
+    monkeypatch.setattr(settings, "news_map_global_hourly_limit", 100)
+    client = TestClient(app)
+
+    # Admission occurs before provider work, even when the requested ID is missing.
+    assert client.get("/api/v1/news/missing/source").status_code == 404
+    assert client.get("/api/v1/news/missing/source").status_code == 404
+    assert client.get("/api/v1/news/search?q=반도체").status_code == 429
+    assert client.get("/api/v1/news/missing/graph").status_code == 404
+    assert client.get("/api/v1/news/missing/related").status_code == 429
+
+
+def test_public_news_work_fails_closed_when_required_quota_store_is_down(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "session_store_required", True)
+    client = TestClient(app)
+    assert client.get("/api/v1/news/search?q=반도체").status_code == 503
+    assert client.get("/api/v1/news/missing/graph").status_code == 503
+    assert client.get("/health").status_code == 200
+
+
+def test_foreign_origin_cannot_mutate_cookie_session() -> None:
+    client = TestClient(app)
+    path = "/api/v1/session/mindmap/expand"
+    payload = {"news_id": "private"}
+    denied = client.post(path, json=payload, headers={"Origin": "https://foreign.example"})
+    assert denied.status_code == 403
+    assert client.get("/api/v1/session").json()["mindmap"]["expanded_news_ids"] == []
+
+    allowed = client.post(path, json=payload, headers={"Origin": "http://localhost:5173"})
+    assert allowed.status_code == 200
+    assert client.get("/api/v1/session").json()["mindmap"]["expanded_news_ids"] == ["private"]

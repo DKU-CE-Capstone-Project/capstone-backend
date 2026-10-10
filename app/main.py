@@ -86,6 +86,12 @@ async def session_cookie_middleware(request: Request, call_next):
     )
     if not needs_session:
         return await call_next(request)
+    # CORS controls response reads, not cross-origin form submissions that
+    # mutate a cookie session. Reject an explicit foreign Origin before work.
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in settings.cors_origin_list:
+            return JSONResponse(status_code=403, content={"detail": "허용되지 않은 요청 출처입니다."})
     try:
         sid, is_new = await resolve(request.cookies.get(SESSION_COOKIE) or "")
     except SessionStoreUnavailable:
