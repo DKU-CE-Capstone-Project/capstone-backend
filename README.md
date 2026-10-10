@@ -9,6 +9,46 @@
 
 Redis의 원자적 카운터는 최근 1시간 동안 작업 제출 세션당 10건/전체 200건, 리포트 신규 생성 5건/전체 100건, 전략 생성 10건/전체 200건, 레거시 분석 10건/전체 200건으로 제한한다. 공개 검색·카드·원문 분류는 연결 상대당 120건/전체 1200건, 뉴스맵 graph·related는 연결 상대당 30건/전체 300건으로 제한한다. 초과 시 429, Redis 장애 시 운영 기본값에서 503이다. 로컬 메모리 제한은 `SESSION_STORE_REQUIRED=false`를 명시한 단일 인스턴스 개발 전용이다. 공개 경로는 쿠키 세션을 요구하지 않으며 프록시 뒤에서는 연결 상대 한도가 공유될 수 있다. 서버 전체 한도가 우회 방지 상한이고, 수치는 운영 트래픽·공급자 예산에 맞춰 조정해야 한다. 로그인과 실제 구독 권한은 아직 없어 PAID 데모는 기본 차단한다. 쿠키 세션의 변경 요청에 명시적 Origin이 있으면 `CORS_ORIGINS`와 대조해 다른 출처를 거부한다.
 
+## 로컬 Decision API 뉴스맵 (2026-10-10)
+
+최신 `main/8d659b8`에서 만든 로컬 `codex/decision-news-map-20261010` 작업이다.
+`GET /api/v1/news/{id}/related`와 `/graph`에서 다음 설정으로 Decision 선정을 사용한다.
+새 `/api/v2` 계약이나 DB 스키마를 적용하는 작업은 아니다.
+
+```dotenv
+NEWS_MAP_SELECTOR=decision
+OPENAI_API_KEY=                 # 실제 값은 git에서 제외되는 .env에만 입력. 기존 OAI_KEY도 호환.
+USE_MONGODB=false              # DB 없는 로컬 검증
+MONGODB_REQUIRED=false
+SESSION_STORE_REQUIRED=false
+```
+
+[OpenAI 공식 Decisions 안내](https://developers.openai.com/api/docs/guides/decisions)에 따라
+`POST https://api.openai.com/v1/decisions`와 `gpt-6-luna`를 사용한다. 기존 httpx로 호출하며 추가 SDK 의존성은 없다.
+입력은 정제·길이 제한한 기사 두 건의 **제목·검색 description·발행 시각**이다.
+본문·벡터·세션·API 키를 판단 입력으로 보내지 않는다.
+
+2026-10-08 `.local/decision-api-new-topics-20261008`의 OpenAI C 질문·라우팅 임계값을 가져왔다.
+동일 사건의 반복을 먼저 제외하고, 배경·영향/후속·다른 관점·구체적 설명의 유용성을 판정한다.
+도움 점수와 역할 다양화 패널티로 하나씩 고르며 이미 표시할 주변 대표와 중복을 비교한다.
+기존 공개 계약에 맞춰 실험의 묶음 UI/필드를 복원하지 않고 반복 기사는 제외한다.
+탈락한 기사는 다음 후보를 제외하는 기준으로 사용하지 않는다. 의미 품질·임계값은 아직 소표본 실험 수준이다.
+
+FREE/BASIC 최대 주변 3건, PAID 데모 제한, 카드·distance·selection 계약과 최초 20/총 50개 후보 예산을 유지한다.
+Decision 모드의 PAID `relevance_score`와 요청 `min_relevance`는 **기대 도움 점수/3(0~1)** 기준이다.
+Gemini 코사인 점수와 같은 척도가 아니며, `NEWS_MAP_MIN_RELEVANCE`와 MMR 설정은 embedding 모드에만 적용된다.
+뉴스맵 선정에서 Gemini 임베딩을 호출하지 않는다. 일반 검색 메타데이터·리포트 RAG는 기존 처리다.
+
+기본 제한은 동시 4건, 호출당 30초, 맵당 Decision 대기 예산 90초, 재시도 포함 HTTP 시도 200회다.
+429·일시 장애는 최대 3회 시도하고, 키 누락·권한 오류·거절·잘못된 확률 응답은 선정 실패로 처리한다.
+첫 평가/선정 실패는 503, 확장 중 실패는 이미 완료한 결과와 `partial/decision_failed`를 반환한다.
+기존 확장 전체 20초 제한도 적용한다. 캐시는 전체 입력·질문·모델·자격증명 기준으로 분리하고,
+프로세스 메모리에 최대 1,024건·1시간만 보관한다. 재시작하면 캐시는 비워진다.
+
+이 PC의 작업 공간은 기존 백엔드 프로젝트 가상환경을 `.venv`로 연결해 사용한다.
+실행: `.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8011`.
+일반 실행 기본값은 `NEWS_MAP_SELECTOR=embedding`이며 위 로컬 `.env`에서 decision을 활성화한다.
+
 ## 뉴스 공급원 변경 이유
 
 **GDELT에서 반복되는 HTTP 429 오류로 검색과 테스트가 어려워져 기본 공급원을 NCP NAVER API HUB로 변경했다. 해외 뉴스는 검토 예정이다.**

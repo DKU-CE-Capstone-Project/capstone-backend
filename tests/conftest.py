@@ -3,12 +3,14 @@
 import socket
 
 import pytest
+from pydantic import SecretStr
 
 from app import session as session_store
 from app import store, usage_limits
 from app.agents import (
     article_embeddings,
     article_metadata,
+    decision_client,
     diffbot_client,
     naver_categories,
     related_candidates,
@@ -20,6 +22,8 @@ from app.config import settings
 def offline_settings(monkeypatch):
     for key, value in {
         "google_api_key": "",
+        "openai_api_key": SecretStr(""),
+        "news_map_selector": "embedding",
         "anthropic_api_key": "",
         "newsapi_key": "",
         "naver_client_id": "",
@@ -47,6 +51,7 @@ def offline_settings(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", reject_network)
     article_metadata._cache.clear()
     article_embeddings._cache.clear()
+    decision_client._cache.clear()
     related_candidates._cache.clear()
     diffbot_client._extraction_cache.clear()
     naver_categories._cache.clear()
