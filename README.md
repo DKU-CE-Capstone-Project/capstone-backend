@@ -7,7 +7,7 @@
 
 세션 쿠키는 서버가 발급해 Redis에 저장한 값만 수락한다. 세션 초기화 시 쿠키를 교체하고 API JSON에 세션 ID를 노출하지 않는다. 생성한 세션만 리포트·전략·작업 결과를 조회할 수 있다. 세션이 만료되거나 초기화되면 기존 결과를 조회할 수 없으며, 소유자 정보가 없는 기존 결과도 API에서 조회할 수 없다. 클라이언트는 쿠키를 자동 전송해야 한다.
 
-Redis의 원자적 카운터는 최근 1시간 동안 작업 제출 세션당 10건/전체 200건, 리포트 신규 생성 5건/전체 100건, 전략 생성 10건/전체 200건, 레거시 분석 10건/전체 200건으로 제한한다. 초과 시 429, Redis 장애 시 운영 기본값에서 503이다. 로컬 메모리 제한은 `SESSION_STORE_REQUIRED=false`를 명시한 단일 인스턴스 개발 전용이다. 로그인과 실제 구독 권한은 아직 없어 PAID 데모는 기본 차단한다. 뉴스 검색·뉴스맵에는 이 요청 한도가 아직 적용되지 않았으므로 운영 노출 시 별도 용량 검증과 제한이 필요하다.
+Redis의 원자적 카운터는 최근 1시간 동안 작업 제출 세션당 10건/전체 200건, 리포트 신규 생성 5건/전체 100건, 전략 생성 10건/전체 200건, 레거시 분석 10건/전체 200건으로 제한한다. 공개 검색·카드·원문 분류는 연결 상대당 120건/전체 1200건, 뉴스맵 graph·related는 연결 상대당 30건/전체 300건으로 제한한다. 초과 시 429, Redis 장애 시 운영 기본값에서 503이다. 로컬 메모리 제한은 `SESSION_STORE_REQUIRED=false`를 명시한 단일 인스턴스 개발 전용이다. 공개 경로는 쿠키 세션을 요구하지 않으며 프록시 뒤에서는 연결 상대 한도가 공유될 수 있다. 서버 전체 한도가 우회 방지 상한이고, 수치는 운영 트래픽·공급자 예산에 맞춰 조정해야 한다. 로그인과 실제 구독 권한은 아직 없어 PAID 데모는 기본 차단한다. 쿠키 세션의 변경 요청에 명시적 Origin이 있으면 `CORS_ORIGINS`와 대조해 다른 출처를 거부한다.
 
 ## 뉴스 공급원 변경 이유
 
@@ -157,6 +157,8 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 | `CORS_ORIGINS` | 로컬은 `http://localhost:5173,http://127.0.0.1:5173` |
 | `SESSION_STORE_REQUIRED` | 기본 `true`: Redis 장애 시 세션·소유권 API는 503. 단일 인스턴스 로컬 개발에서만 `false` |
 | `PAID_DEMO_ENABLED` | 기본 `false`: 실제 결제 권한 검증 전 PAID 데모 경로 차단 |
+| `NEWS_SEARCH_CLIENT_HOURLY_LIMIT`, `NEWS_SEARCH_GLOBAL_HOURLY_LIMIT` | 공개 검색·카드·원문 분류의 시간당 연결 상대/전체 요청 한도, 기본 120/1200 |
+| `NEWS_MAP_CLIENT_HOURLY_LIMIT`, `NEWS_MAP_GLOBAL_HOURLY_LIMIT` | graph·related의 시간당 연결 상대/전체 요청 한도, 기본 30/300 |
 
 NCP 요청은 `https://naverapihub.apigw.ntruss.com/search/v1/news`에 `X-NCP-APIGW-API-KEY-ID` / `X-NCP-APIGW-API-KEY` 헤더를 보낸다. NAVER Developers 키와 구별한다. NCP에서 해당 애플리케이션의 뉴스 검색 API 사용 권한을 활성화해야 한다.
 응답의 `title`/`description` HTML을 제거하고, `pubDate`를 UTC로 정규화하며 `originallink`(언론사 출처)와 `link`(NAVER 본문 URL)를 모두 보존한다. `total_count`는 필터 전 공급원 전체 검색 수이며 현재 반환 카드 수가 아니다.
