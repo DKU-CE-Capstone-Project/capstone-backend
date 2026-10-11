@@ -1,11 +1,15 @@
 # EconMind Backend
 
 실시간 경제 뉴스 검색·뉴스맵·AI 리포트 API. FastAPI / Python 3.11 이상.
-프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 최신 로컬 범위는 아래 2026-10-11 v2 구현과 현재 작업 트리이며, 2026-10-01~10 설명·검증 수치는 각 날짜의 기록이다. 정본 `docs/14-newsmap-v2-implementation.md`와 `docs/99-verification.md`에 현재 네 저장소의 상태와 검증 범위를 함께 기록했다. 소스 병합과 실제 운영 배포는 별도로 확인해야 한다.
+프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 구현 범위는 아래 2026-10-11 v2 구현과 현재 작업 트리이며, 2026-10-01~10 설명·검증 수치는 각 날짜의 기록이다. 정본 `docs/14-newsmap-v2-implementation.md`와 `docs/99-verification.md`에 현재 네 저장소의 상태와 검증 범위를 함께 기록했다. 현재 운영 상태는 아래 배포 확인을 따른다.
+
+## GCP 배포 확인 (2026-10-11)
+
+[PR #18](https://github.com/DKU-CE-Capstone-Project/capstone-backend/pull/18)을 main `0776ac2`로 병합해 GCP API·v1/v2 워커에 배포했다. 운영은 NAVER·Decision, FREE 1건, Gemini/Flex·critic on, RAG off다. 공개 health/ready, 국제유가 주변 4/4, 실제 Diffbot 본문 982자·리포트/전략·coverage 1/1, MongoDB 근거 해시/참조/BSON Date, 재사용·타 세션 차단·화면 복원을 확인했다. 기존 DB 문서는 백업·호환 검사 후 보존하며 스키마 메타데이터를 전환했다. [배포·검증 근거](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/99-verification.md#2026-10-11-newsmap-v2-gcp-배포). 아래 로컬 구현 절은 배포 전의 작성 기준을 보존한다.
 
 ## 뉴스맵·리포트 API v2 로컬 구현 (2026-10-11)
 
-2026-10-11 확인한 `origin/main/a0d75e3`에서 시작한 `codex/newsmap-v2-20261011` 구현이다. 문서 동기화 때 확인한 기준 커밋은 `9451057`이고, 아래 검색 범위 제한은 그 이후 작업 트리 변경까지 포함한다. 기준 설계는 정본의 [요구사항](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/09-newsmap-prototype-data-requirements.md), [API v2](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/10-newsmap-prototype-api-design.md), [DB](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/11-newsmap-prototype-db-design.md)(초안 2026-10-04)다. 아래 v1 설명과 검증 수치는 각 날짜의 기록이며, 이번 구현은 원격 병합·배포 기록이 아니다.
+2026-10-11 확인한 `origin/main/a0d75e3`에서 시작한 `codex/newsmap-v2-20261011` 구현이다. 문서 동기화 때 확인한 기준 커밋은 `9451057`이고, 아래 검색 범위 제한은 그 이후 작업 트리 변경까지 포함한다. 기준 설계는 정본의 [요구사항](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/09-newsmap-prototype-data-requirements.md), [API v2](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/10-newsmap-prototype-api-design.md), [DB](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/11-newsmap-prototype-db-design.md)(초안 2026-10-04)다. 아래 v1 설명과 검증 수치는 각 날짜의 기록이며, 이 절은 배포 전 로컬 검증 기록이다.
 
 - `/api/v2/session`과 `/maps`는 서버 쿠키 세션에 속한다. JSON에는 공개 `session_epoch`만 제공한다. 맵별 검색 후보·다음 검색 위치·이전 표시 기사·트리를 Redis에 저장하고 revision CAS로 늦은 변경을 거부한다. 초기 주변 목표는 4건, 하위 가지는 3건이며 재검색 0건은 기존 가지를 유지한다. 초기화해도 노드 ID를 재사용하지 않는다.
 - 추가 검색은 원래 검색어의 다음 결과만 사용한다. 기본 최초 1~20건으로 목표를 채우지 못하면 21~40건, 여전히 부족하면 41~50건을 요청하고 멈춘다. 제목·키워드를 조합한 검색어 생성은 제거했다. 50번째는 필터 전 원시 검색 위치의 상한이며, 중복·분류 제외로 부족해도 51번째를 검색하지 않는다. 이미 저장된 51번째 이후 후보도 선정하지 않는다. v1/v2와 Decision/embedding 공통 수집 정책이며 관련성·반복 제외·선정 기준은 유지한다.
