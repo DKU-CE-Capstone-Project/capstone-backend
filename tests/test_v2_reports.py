@@ -41,8 +41,8 @@ def pipeline(monkeypatch):
         ids = [e["news_id"] for e in payload["used_evidence"]]
         return json.dumps({"title": "검증용 경제 리포트", "event_summary": "본문으로 분석한 사건", "event_analysis": "실제 원문 근거의 분석", "market_impact": "시장에 대한 영향", "stock_impacts": [{"ticker": None, "name": "반도체 업종", "impact": "본문에서 확인한 투자 영향", "direction": "unknown", "evidence_news_ids": ids}], "risk_factors": ["불확실성"]})
 
-    async def strategy(summary, risk_level="medium", period="short", *, strict=False):
-        calls["strategy"].append((summary, risk_level, period, strict))
+    async def strategy(report, risk_level="medium", period="short"):
+        calls["strategy"].append((report, risk_level, period))
         return {"strategy_summary": "단기 관망 전략", "risk_warning": "투자 결과를 보장하지 않습니다.", "strategy_items": [{"ticker": None, "stock_name": "반도체 업종", "action": "watch", "reason": "불확실성 확인"}]}
 
     async def publish(*args):
@@ -50,7 +50,7 @@ def pipeline(monkeypatch):
 
     monkeypatch.setattr(reports.diffbot_client, "extract_articles_with_diffbot", extract)
     monkeypatch.setattr(reports.llm, "generate", generate)
-    monkeypatch.setattr(reports.strategy_generator, "generate_strategy", strategy)
+    monkeypatch.setattr(reports, "generate_strategy", strategy)
     monkeypatch.setattr(report_worker, "publish", publish)
     return calls
 
@@ -187,16 +187,16 @@ async def test_stock_impacts_must_reference_successful_selected_evidence(pipelin
 
 async def test_strategy_failure_preserves_report_and_retry_generates_only_strategy(pipeline, monkeypatch):
     sid, map_id, ids = await fixture_map()
-    original = reports.strategy_generator.generate_strategy
+    original = reports.generate_strategy
 
     async def fail(*args, **kwargs):
         raise ValueError("provider unavailable")
 
-    monkeypatch.setattr(reports.strategy_generator, "generate_strategy", fail)
+    monkeypatch.setattr(reports, "generate_strategy", fail)
     first = await finish(sid, await submit(sid, map_id, ids))
     assert first["status"] == "completed" and first["warnings"] == ["STRATEGY_GENERATION_FAILED"]
     assert first["result"]["strategy_id"] is None
-    monkeypatch.setattr(reports.strategy_generator, "generate_strategy", original)
+    monkeypatch.setattr(reports, "generate_strategy", original)
     second = await finish(sid, await submit(sid, map_id, ids))
     assert second["result"]["report_id"] == first["result"]["report_id"]
     assert second["result"]["strategy_id"] and len(pipeline["analyze"]) == 1
@@ -462,3 +462,40 @@ async def test_report_storage_rejects_missing_body_reference_or_changed_excerpt(
     modified["used_evidence"][0]["input_char_count"] = len("다른 본문")
     with pytest.raises(ValueError, match="recorded body prefix"):
         await persistence.save_report(modified)
+
+
+@pytest.mark.parametrize("stock_name,ticker,accepted", [
+    ("외화 자산", None, True),
+    ("외화 자산", "USDKRW", False),
+    ("새로운 ETF", None, False),
+    ("관련 없는 종목", "005930", False),
+])
+async def test_strategy_uses_only_report_assets_and_cannot_invent_tickers(monkeypatch, stock_name, ticker, accepted):
+    report = {
+        "event_summary": "환율 하락", "event_analysis": "분할 대응", "market_impact": "변동성",
+        "stock_impacts": [{"name": "외화 자산", "ticker": None, "impact": "환율 변동", "direction": "mixed", "evidence_news_ids": ["selected"]}],
+        "risk_factors": ["평가 손실"], "verification": {"status": "warning", "notes": ["추가 확인 필요"]},
+    }
+    prompts = []
+    async def generate(prompt):
+        prompts.append(prompt)
+        return json.dumps({"strategy_summary": "분할 대응 참고", "risk_warning": "성과를 보장하지 않습니다.", "strategy_items": [{"stock_name": stock_name, "ticker": ticker, "action": "watch", "reason": "추가 확인"}]})
+    monkeypatch.setattr(reports.llm, "generate", generate)
+    if accepted:
+        output = await reports.generate_strategy(report, risk_level="low", period="long")
+        assert output["strategy_items"][0]["ticker"] is None
+    else:
+        with pytest.raises(ValueError, match="asset absent"):
+            await reports.generate_strategy(report, risk_level="low", period="long")
+    data = json.loads(prompts[0].rsplit("\n", 1)[-1])
+    assert data["report"] == report
+    assert data["risk_level"] == "low" and data["period"] == "long"
+    assert "expected_return" not in prompts[0]
+
+
+async def test_strategy_without_report_assets_can_abstain(monkeypatch):
+    report = {"event_summary": "사건", "event_analysis": "분석", "market_impact": "불명", "stock_impacts": [], "risk_factors": [], "verification": {"status": "passed", "notes": []}}
+    async def generate(prompt):
+        return json.dumps({"strategy_summary": "추가 근거 확인", "risk_warning": "투자 성과를 보장하지 않습니다.", "strategy_items": []})
+    monkeypatch.setattr(reports.llm, "generate", generate)
+    assert (await reports.generate_strategy(report, risk_level="medium", period="short"))["strategy_items"] == []

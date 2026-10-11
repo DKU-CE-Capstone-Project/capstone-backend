@@ -85,7 +85,7 @@ async def local_services(monkeypatch):
 
     monkeypatch.setattr(reports.diffbot_client, "extract_articles_with_diffbot", extract)
     monkeypatch.setattr(reports.llm, "generate", generate)
-    monkeypatch.setattr(reports.strategy_generator, "generate_strategy", strategy)
+    monkeypatch.setattr(reports, "generate_strategy", strategy)
     try:
         yield db, sessions, calls
     finally:

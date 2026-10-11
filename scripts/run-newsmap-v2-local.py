@@ -1,7 +1,8 @@
-"""Run real NAVER/Decision exploration with isolated local persistence."""
+"""Run real news-map API or report worker with isolated local persistence."""
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -15,6 +16,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--credentials-file", type=Path, default=ROOT / ".env")
     parser.add_argument("--port", type=int, default=8026)
+    parser.add_argument("--with-reports", action="store_true", help="Enable real Diffbot/Gemini reports and critic (run --worker separately)")
+    parser.add_argument("--worker", action="store_true", help="Run the report worker with the same isolated report profile")
     args = parser.parse_args()
     credentials = dotenv_values(args.credentials_file)
     required = {
@@ -22,12 +25,16 @@ def main() -> None:
         "NAVER_CLIENT_SECRET": credentials.get("NAVER_CLIENT_SECRET"),
         "OPENAI_API_KEY": credentials.get("OPENAI_API_KEY") or credentials.get("OAI_KEY"),
     }
+    reports_enabled = args.with_reports or args.worker
+    if reports_enabled:
+        required.update({
+            "GOOGLE_API_KEY": credentials.get("GOOGLE_API_KEY"),
+            "DIFFBOT_TOKEN": credentials.get("DIFFBOT_API_KEY") or credentials.get("DIFFBOT_TOKEN"),
+        })
     missing = [name for name, value in required.items() if not value or not value.strip()]
     if missing:
         parser.error("Missing credentials: " + ", ".join(missing))
-    # Read only the three authorized provider keys. Never inherit the credential
-    # file's DB endpoints or other provider keys into this verification profile.
-    os.environ.update({name: value.strip() for name, value in required.items()})
+    # Copy only explicitly selected provider keys, never DB endpoints from .env.
     os.environ.update({
         "NEWS_PROVIDER": "naver", "NEWS_MAP_SELECTOR": "decision",
         "USE_MOCK_NEWS": "false", "DEMO_MODE": "false",
@@ -41,15 +48,23 @@ def main() -> None:
         "PROTOTYPE_TIER": "FREE", "PAID_DEMO_ENABLED": "false",
         "CORS_ORIGINS": "http://127.0.0.1:5196,http://localhost:5196,http://127.0.0.1:5173,http://localhost:5173",
         "USE_LLM_METADATA": "false", "USE_LLM_SUMMARIES": "false",
-        "USE_RAG": "false", "USE_CRITIC": "false",
+        "USE_RAG": "false", "USE_CRITIC": "true" if reports_enabled else "false",
+        "LLM_PROVIDER": "gemini",
         "GOOGLE_API_KEY": "", "ANTHROPIC_API_KEY": "",
         "DIFFBOT_TOKEN": "", "DIFFBOT_API_KEY": "",
     })
+    os.environ.update({name: value.strip() for name, value in required.items()})
     sys.path.insert(0, str(ROOT))
+    if args.worker:
+        from app.v2.report_worker import main as worker_main
+
+        print("[local-v2] report worker: real Diffbot/Gemini + critic; local RAG disabled")
+        asyncio.run(worker_main())
+        return
     import uvicorn
 
     print("[local-v2] real NAVER + Decision; loopback MongoDB/Redis/NATS; FREE")
-    print("[local-v2] metadata uses rules; report generation is outside this profile")
+    print("[local-v2] real Diffbot/Gemini reports + critic; start --worker separately" if reports_enabled else "[local-v2] metadata uses rules; report generation is outside this profile")
     uvicorn.run("app.main:app", host="127.0.0.1", port=args.port)
 
 
