@@ -81,6 +81,8 @@ async def generate_strategy(
     report_summary: str,
     risk_level: str = "medium",
     period: str = "short",
+    *,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """
     Generate an investment strategy using Gemini.
@@ -97,7 +99,18 @@ async def generate_strategy(
     parsed = _extract_json(raw) if raw else None
 
     if not parsed:
+        if strict:
+            raise ValueError("Strategy generation did not produce valid JSON")
         return _dummy_strategy(risk_level, period)
+
+    if strict:
+        # V2 must never silently turn missing/invalid output into the legacy
+        # demonstration portfolio. Its caller validates the complete DTO.
+        return {
+            "strategy_summary": parsed.get("strategy_summary"),
+            "strategy_items": parsed.get("strategy_items"),
+            "risk_warning": parsed.get("risk_warning") or "AI가 제안한 전략이며 실제 수익률이나 투자 결과를 보장하지 않습니다.",
+        }
 
     items = parsed.get("strategy_items", _DUMMY_ITEMS)
     valid_actions = {"buy", "hold", "sell", "watch"}

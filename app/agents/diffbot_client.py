@@ -302,6 +302,7 @@ async def extract_articles_with_diffbot(
     timeout_ms: int = DEFAULT_TIMEOUT_MS,
     max_retries: int = DEFAULT_MAX_RETRIES,
     concurrency: int = 2,
+    use_cache: bool = True,
 ) -> list[dict[str, Any]]:
     token = token if token is not None else load_diffbot_token()
     if not articles:
@@ -327,7 +328,7 @@ async def extract_articles_with_diffbot(
             url = naver_url or article.get("url", "")
             cache_key = (url, hashlib.sha256((token + "|image-selection-v2").encode()).hexdigest())
             cached = _extraction_cache.get(cache_key)
-            if cached and cached[0] > time.monotonic():
+            if use_cache and cached and cached[0] > time.monotonic():
                 _extraction_cache.move_to_end(cache_key)
                 return {**article, **deepcopy(cached[1])}
             fields = {}

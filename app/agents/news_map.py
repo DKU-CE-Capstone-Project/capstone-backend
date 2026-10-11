@@ -102,16 +102,20 @@ def _latest_session(pool: list[dict[str, Any]], keyword: str) -> tuple[int, str]
 
 
 class _Expansion:
-    def __init__(self, center: dict[str, Any], selector: NewsMapSelector | DecisionNewsMapSelector, stats: dict[str, Any]):
+    def __init__(self, center: dict[str, Any], selector: NewsMapSelector | DecisionNewsMapSelector, stats: dict[str, Any],
+                 search_context: dict[str, Any] | None = None):
         self.center = center
         self.selector = selector
         self.stats = stats
+        self.search_context = search_context
 
     async def search(self, query: str, *, start: int, session: str | None = None) -> list[dict[str, Any]]:
         """One bounded raw page; category checks only for new candidates still needed."""
         page = await cached_search(query, start=start, size=settings.news_map_supplement_page_size,
                                    fetch=news_fetcher.fetch_search_page, stats=self.stats)
         self.stats["raw"] += len(page.articles)
+        if self.search_context is not None:
+            self.search_context.setdefault("next_positions", {})[query] = page.end + 1
         fresh = [a for a in page.articles if self.selector.is_new(a)]
         self.stats["raw_duplicates"] += len(page.articles) - len(fresh)
         needed = settings.news_map_max_candidates - self.selector.evaluated
@@ -149,12 +153,20 @@ class _Expansion:
             yield "cached_pool", False, cached
         if not news_fetcher.expansion_supported():
             return
-        keyword = self.center.get("_search_keyword") or ""
+        keyword = ((self.search_context or {}).get('query') if self.search_context is not None
+                   else self.center.get("_search_keyword")) or ""
         latest = _latest_session(pool, keyword) if keyword else None
-        queries = grounded_queries(self.center)
+        if self.search_context is not None:
+            positions = self.search_context.get("next_positions", {})
+            original_start = positions.get(keyword, self.search_context.get("raw_end", 0) + 1)
+            latest = (max(0, original_start - 1), self.search_context.get("observed_at", ""))
+        queries = grounded_queries({**self.center, '_search_keyword': keyword})
         for index, query in enumerate(queries):
-            async def grounded(query=query):
-                return await self.search(query, start=1)
+            start = (self.search_context or {}).get("next_positions", {}).get(query, 1)
+            if start > _MAX_START:
+                continue
+            async def grounded(query=query, start=start):
+                return await self.search(query, start=start)
             yield "grounded_query", True, grounded
             # The center's most specific grounded query first targets its own event and
             # background; the original query's next raw page then keeps the user's intent.
@@ -171,13 +183,20 @@ class _Expansion:
 
 async def build_news_map(
     center: dict[str, Any], *, target: int, min_relevance: float = 0.0, expand: bool = True,
+    pool: list[dict[str, Any]] | None = None, exclude_articles: list[dict[str, Any]] | None = None,
+    search_context: dict[str, Any] | None = None,
 ) -> NewsMapResult:
+    excluded = set().union(*(identity_keys(a) for a in exclude_articles or []))
     if settings.news_map_selector == "decision":
         async with DecisionClient() as client:
             selector = DecisionNewsMapSelector(center, client, min_relevance=min_relevance)
-            return await _build_news_map(center, selector, target=target, expand=expand)
-    return await _build_news_map(center, NewsMapSelector(center, min_relevance=min_relevance),
-                                 target=target, expand=expand)
+            selector._seen.update(excluded)
+            return await _build_news_map(center, selector, target=target, expand=expand, pool=pool,
+                                         search_context=search_context)
+    selector = NewsMapSelector(center, min_relevance=min_relevance)
+    selector._seen.update(excluded)
+    return await _build_news_map(center, selector, target=target, expand=expand, pool=pool,
+                                 search_context=search_context)
 
 
 async def _select(selector: NewsMapSelector | DecisionNewsMapSelector, target: int) -> list[RankedArticle]:
@@ -188,13 +207,14 @@ async def _select(selector: NewsMapSelector | DecisionNewsMapSelector, target: i
 
 async def _build_news_map(
     center: dict[str, Any], selector: NewsMapSelector | DecisionNewsMapSelector, *, target: int, expand: bool,
+    pool: list[dict[str, Any]] | None = None, search_context: dict[str, Any] | None = None,
 ) -> NewsMapResult:
     """Select up to ``target`` neighbours; never lowers the relevance gate to fill slots."""
     started = time.monotonic()
     stats: dict[str, Any] = {"pool": 0, "initial": 0, "search_steps": 0, "searches": 0, "search_cache_hits": 0,
                              "raw": 0, "raw_duplicates": 0, "filtered": 0, "rounds": 0}
     usage = track_usage()
-    pool = await cached_pool(center)
+    pool = await cached_pool(center) if pool is None else [a for a in pool if selector.is_new(a)]
     stats["pool"] = len(pool)
     # The first round takes the first unique candidates in search order.
     consumed = _initial_end(center, pool, settings.news_map_initial_candidates)
@@ -204,7 +224,7 @@ async def _build_news_map(
     stats["rounds"] = 1
     items = await _select(selector, target)
     status, reason = (COMPLETE, None) if len(items) >= target else (INSUFFICIENT, None)
-    expansion = _Expansion(center, selector, stats)
+    expansion = _Expansion(center, selector, stats, search_context)
     steps = list(expansion.steps(pool, consumed))
     if status == INSUFFICIENT and not expand:
         if selector.evaluated < settings.news_map_max_candidates and any(

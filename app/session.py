@@ -42,6 +42,10 @@ class SessionStoreUnavailable(RuntimeError):
     """The shared session store cannot establish the caller's identity."""
 
 
+class SessionExpired(RuntimeError):
+    """A pending mutation must not recreate an expired or revoked identity."""
+
+
 def new_session_id() -> str:
     return uuid.uuid4().hex
 
@@ -102,7 +106,7 @@ async def issue(client_host: str | None) -> str:
         global_limit=settings.session_issue_global_hourly_limit,
     )
     sid = new_session_id()
-    await save(sid, _empty(sid))
+    await save(sid, _empty(sid), _create=True)
     return sid
 
 
@@ -141,8 +145,8 @@ async def load(sid: str) -> dict[str, Any]:
     return await _existing(sid) or _empty(sid)
 
 
-async def save(sid: str, data: dict[str, Any]) -> None:
-    """세션 상태를 저장하고 TTL을 갱신한다(접근할 때마다 만료가 뒤로 밀린다)."""
+async def save(sid: str, data: dict[str, Any], *, _create: bool = False) -> None:
+    """Update only a live identity. Creation is reserved for issue()."""
     if not sid:
         return
     ttl = settings.session_ttl_seconds
@@ -150,17 +154,28 @@ async def save(sid: str, data: dict[str, Any]) -> None:
     client = _client()
     if client is not None:
         try:
-            await client.set(
+            saved = await client.set(
                 f"{_KEY_PREFIX}{sid}",
                 json.dumps(data, ensure_ascii=False),
                 ex=ttl,
+                nx=_create,
+                xx=not _create,
             )
-            return
         except Exception as exc:  # noqa: BLE001
             print(f"[session] Redis set 실패: {type(exc).__name__}")
+        else:
+            if not saved:
+                if _create:
+                    raise SessionStoreUnavailable("Session identity collision")
+                raise SessionExpired("Session expired")
+            return
 
     _require_store()
     _prune_memory()
+    if _create and sid in _memory_store:
+        raise SessionStoreUnavailable("Session identity collision")
+    if not _create and sid not in _memory_store:
+        raise SessionExpired("Session expired")
     _memory_store[sid] = (time.time() + ttl, data)
 
 

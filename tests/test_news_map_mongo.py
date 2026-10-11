@@ -24,10 +24,10 @@ async def local_mongo(monkeypatch):
         pytest.skip("Set NEWS_MAP_TEST_MONGODB_URI for the isolated local test instance")
     address = urlsplit(uri)
     assert address.scheme == "mongodb" and address.hostname == "127.0.0.1"
-    assert address.port == 27028 and address.username is None and address.password is None
+    assert address.port in (27028, 27218) and address.username is None and address.password is None
 
     def local_only(sock, target):
-        assert target[:2] == ("127.0.0.1", 27028), "Only the isolated test MongoDB is allowed"
+        assert target[:2] == ("127.0.0.1", address.port), "Only the isolated test MongoDB is allowed"
         return _REAL_CONNECT(sock, target)
 
     monkeypatch.setattr(socket.socket, "connect", local_only)
@@ -116,8 +116,8 @@ async def test_local_mongo_pool_keeps_search_rank_and_selection_after_restart(lo
     store.news_cache.clear()
     embeddings._cache.clear()
     after = await news_map.build_news_map(await store.get_news(center_id), target=10)
-    assert [g.representative.article["news_id"] for g in after.groups] == \
-        [g.representative.article["news_id"] for g in before.groups]
+    assert [item.article["news_id"] for item in after.items] == \
+        [item.article["news_id"] for item in before.items]
     free = await news.get_related(center_id, limit=10, min_relevance=0, include_score=False, tier="FREE", expand=True)
     graph = await news.get_graph(center_id, depth=3, limit=10, include_distance=True,
                                  min_relevance=0, include_score=False, tier="FREE", expand=True)
@@ -152,7 +152,7 @@ async def test_local_mongo_expansion_cards_and_map_vectors_survive_restart(local
     from tests.test_news_map_diversity import OIL_CENTER, oil
     await cache_articles([cached(oil("center", *OIL_CENTER), 1), cached(repeat(1), 2)])
     before = await news_map.build_news_map(await store.get_news("center"), target=1)
-    assert [g.representative.article["news_id"] for g in before.groups] == ["forecast"]
+    assert [item.article["news_id"] for item in before.items] == ["forecast"]
     assert len(searches) == 1 and searches[0][0] != "국제유가" and searches[0][1] == 1
     saved = await local_mongo[database.NEWS].find_one({"news_id": "forecast"})
     assert "embedding" not in saved  # No extra RAG generation during expansion.
@@ -163,7 +163,7 @@ async def test_local_mongo_expansion_cards_and_map_vectors_survive_restart(local
     embeddings._cache.clear()
     related_candidates._cache.clear()
     after = await news_map.build_news_map(await store.get_news("center"), target=1)
-    assert [g.representative.article["news_id"] for g in after.groups] == ["forecast"]
-    assert after.groups[0].representative.article["description"] == angle("forecast")["description"]
+    assert [item.article["news_id"] for item in after.items] == ["forecast"]
+    assert after.items[0].article["description"] == angle("forecast")["description"]
     # The saved card and map vector are reused after the restart: no new vectors.
     assert len(calls) == count and after.stats["embedding_calls"] == 0
