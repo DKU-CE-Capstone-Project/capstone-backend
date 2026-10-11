@@ -225,7 +225,7 @@ def test_related_and_graph_share_saved_pair_policy_expansion_and_shortage(monkey
     assert initial_related["related_news"] == [] and len(initial_graph["nodes"]) == 1
     assert calls == []
     related, graph = request("related", True), request("graph", True)
-    assert len(calls) == 1
+    assert calls == [(CENTER["_search_keyword"], 21, 20), (CENTER["_search_keyword"], 41, 10)]
     assert related["selection"] == graph["selection"] == {
         "status": "insufficient", "reason": "search_limit", "requested": requested, "returned": 1}
     assert [a["news_id"] for a in related["related_news"]] == [NEWSIS["article"]["news_id"]]

@@ -187,7 +187,7 @@ async def test_expansion_preserves_distinct_background_and_excludes_copies(monke
     monkeypatch.setattr(related_selector, "article_vector", vector)
     from app.agents import news_fetcher
     monkeypatch.setattr(news_fetcher, "inspect_search_articles", passthrough)
-    seen = searches(monkeypatch, {"*": [copy, angle("opec")]})
+    seen = searches(monkeypatch, {"국제유가": [center] * 20 + [copy, angle("opec")] + [center] * 40})
     result = await news_map.build_news_map(center, target=3)
     assert ids(result.items) == ["airlines", "opec"]
     assert len(seen) == result.stats["neighbour_repeats"] == 1

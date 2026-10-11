@@ -215,7 +215,6 @@ async def test_v2_real_decision_selector_honors_target_and_excluded_identity(mon
 async def test_expansion_continues_map_query_instead_of_article_membership(monkeypatch):
     from app.agents import news_map
     from app.agents.related_selector import NewsMapSelector
-    monkeypatch.setattr(news_map, 'grounded_queries', lambda center: [])
     center = {'news_id': 'center', 'title': '유가', '_search_keyword': '다른 맵'}
     expansion = news_map._Expansion(center, NewsMapSelector(center), {},
                                     {'query': '원유', 'observed_at': state.iso(), 'next_positions': {'원유': 21}})

@@ -3,9 +3,8 @@
 Order: cached original-search pool (about 20 unique) -> identity de-duplication
 -> Gemini relevance + minimum gate -> direct repetition exclusion + MMR -> display
 limit. Only when meaningful neighbours are short does expansion add candidates,
-from the cached remainder, the center's first grounded query, the original
-query's next raw page, then further grounded queries, up to one per-request
-total of unique evaluated candidates and
+from the cached remainder and the original query's next raw pages, stopping at
+raw search position 50 as well as the per-request unique candidate limit and
 separate search-call and time budgets. Expansion never extracts bodies, writes
 reports, generates metadata or creates RAG vectors.
 """
@@ -16,6 +15,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from itertools import chain
 from typing import Any
 
 from app import database, store
@@ -24,7 +24,7 @@ from app.agents.article_embeddings import EmbeddingUnavailable, map_text, track_
 from app.agents.decision_client import DecisionClient, DecisionUnavailable
 from app.agents.decision_selector import DecisionNewsMapSelector
 from app.agents.naver_client import NaverNewsError
-from app.agents.related_candidates import cached_search, grounded_queries
+from app.agents.related_candidates import cached_search
 from app.agents.related_selector import (
     NewsMapSelector,
     RankedArticle,
@@ -38,8 +38,8 @@ from app.utils import cache_articles, tier_ok
 logger = logging.getLogger("econmind.news_map")
 
 COMPLETE, INSUFFICIENT, PARTIAL, EXPANDABLE = "complete", "insufficient", "partial", "expandable"
-# NAVER search accepts start positions up to 1000.
-_MAX_START = 1000
+# The map only uses the first 50 raw results of the user's original query.
+_MAX_SEARCH_POSITION = 50
 
 
 @dataclass
@@ -108,12 +108,16 @@ class _Expansion:
         self.selector = selector
         self.stats = stats
         self.search_context = search_context
+        self.raw_end = 0
+        self.exhausted = False
 
-    async def search(self, query: str, *, start: int, session: str | None = None) -> list[dict[str, Any]]:
+    async def search(self, query: str, *, start: int, size: int, session: str) -> list[dict[str, Any]]:
         """One bounded raw page; category checks only for new candidates still needed."""
-        page = await cached_search(query, start=start, size=settings.news_map_supplement_page_size,
+        page = await cached_search(query, start=start, size=size,
                                    fetch=news_fetcher.fetch_search_page, stats=self.stats)
         self.stats["raw"] += len(page.articles)
+        self.raw_end = page.end
+        self.exhausted = page.end < start + size - 1 or page.end >= page.total
         if self.search_context is not None:
             self.search_context.setdefault("next_positions", {})[query] = page.end + 1
         fresh = [a for a in page.articles if self.selector.is_new(a)]
@@ -131,15 +135,8 @@ class _Expansion:
         now = datetime.now(UTC).isoformat()
         prepared = []
         for article in accepted:
-            previous = store.news_cache.get(article_id(article)) or {}
-            if session is not None:
-                # The original session continues; keep its timestamp so page 1 stays first.
-                membership = {"_search_keyword": query, "_search_end": page.end, "_searched_at": session or now}
-            elif previous.get("_search_keyword"):
-                membership = {k: previous[k] for k in ("_search_keyword", "_search_rank", "_search_end",
-                                                       "_searched_at") if k in previous}
-            else:
-                membership = {"_search_keyword": query, "_search_end": page.end, "_searched_at": now}
+            # Keep the original session's timestamp so its first page stays first.
+            membership = {"_search_keyword": query, "_search_end": page.end, "_searched_at": session or now}
             prepared.append({**article, **membership})
         # Map-only cache: grounded rule metadata and map vectors, no Flex or RAG calls.
         return await cache_articles(prepared, news_map_only=True)
@@ -160,25 +157,20 @@ class _Expansion:
             positions = self.search_context.get("next_positions", {})
             original_start = positions.get(keyword, self.search_context.get("raw_end", 0) + 1)
             latest = (max(0, original_start - 1), self.search_context.get("observed_at", ""))
-        queries = grounded_queries({**self.center, '_search_keyword': keyword})
-        for index, query in enumerate(queries):
-            start = (self.search_context or {}).get("next_positions", {}).get(query, 1)
-            if start > _MAX_START:
-                continue
-            async def grounded(query=query, start=start):
-                return await self.search(query, start=start)
-            yield "grounded_query", True, grounded
-            # The center's most specific grounded query first targets its own event and
-            # background; the original query's next raw page then keeps the user's intent.
-            if index == 0 and latest and latest[0] < _MAX_START:
-                yield "original_next", True, self._original(keyword, latest)
-        if not queries and latest and latest[0] < _MAX_START:
-            yield "original_next", True, self._original(keyword, latest)
+        if not keyword or not latest:
+            return
+        self.raw_end = latest[0]
+        start = self.raw_end + 1
+        while start <= _MAX_SEARCH_POSITION:
+            size = min(settings.news_map_supplement_page_size, _MAX_SEARCH_POSITION - start + 1)
 
-    def _original(self, keyword: str, latest: tuple[int, str]):
-        async def original():
-            return await self.search(keyword, start=latest[0] + 1, session=latest[1])
-        return original
+            async def original(start=start, size=size):
+                return await self.search(keyword, start=start, size=size, session=latest[1])
+
+            yield "original_next", True, original
+            if self.exhausted:
+                return
+            start += size
 
 
 async def build_news_map(
@@ -215,6 +207,8 @@ async def _build_news_map(
                              "raw": 0, "raw_duplicates": 0, "filtered": 0, "rounds": 0}
     usage = track_usage()
     pool = await cached_pool(center) if pool is None else [a for a in pool if selector.is_new(a)]
+    pool = [a for a in pool if not isinstance(a.get("_search_rank"), int)
+            or a["_search_rank"] <= _MAX_SEARCH_POSITION]
     stats["pool"] = len(pool)
     # The first round takes the first unique candidates in search order.
     consumed = _initial_end(center, pool, settings.news_map_initial_candidates)
@@ -225,16 +219,17 @@ async def _build_news_map(
     items = await _select(selector, target)
     status, reason = (COMPLETE, None) if len(items) >= target else (INSUFFICIENT, None)
     expansion = _Expansion(center, selector, stats, search_context)
-    steps = list(expansion.steps(pool, consumed))
+    steps = expansion.steps(pool, consumed)
+    first_step = next(steps, None)
     if status == INSUFFICIENT and not expand:
-        if selector.evaluated < settings.news_map_max_candidates and any(
-                not external or settings.news_map_supplement_max_searches for _, external, _ in steps):
+        if selector.evaluated < settings.news_map_max_candidates and first_step is not None and (
+                not first_step[1] or settings.news_map_supplement_max_searches):
             status, reason = EXPANDABLE, None
     elif status == INSUFFICIENT:
         reason = "exhausted"
         try:
             async with asyncio.timeout(settings.news_map_supplement_timeout_seconds):
-                for name, external, fetch in steps:
+                for name, external, fetch in chain([first_step] if first_step is not None else [], steps):
                     if selector.evaluated >= settings.news_map_max_candidates:
                         reason = "candidate_limit"
                         break
@@ -253,7 +248,9 @@ async def _build_news_map(
                         status, reason = COMPLETE, None
                         break
                 else:
-                    if not steps:
+                    if expansion.raw_end >= _MAX_SEARCH_POSITION:
+                        reason = "search_limit"
+                    elif first_step is None:
                         reason = "no_source"
         except TimeoutError:
             status, reason = PARTIAL, "timeout"

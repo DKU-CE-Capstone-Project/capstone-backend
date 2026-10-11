@@ -118,7 +118,7 @@ async def test_initial_candidates_sufficient_skip_external_search(monkeypatch, o
     assert result.stats["center_repeats"] == 5
 
 
-async def test_initial_pool_full_of_repeats_expands_with_grounded_then_original_next_page(monkeypatch, oil_map):
+async def test_initial_pool_full_of_repeats_uses_only_original_next_page(monkeypatch, oil_map):
     center, _ = oil_map
     put([cached(repeat(i), i + 2) for i in range(19)])
     raw = [center, *[repeat(i) for i in range(19)], repeat(30), angle("forecast"), angle("refiners"),
@@ -126,12 +126,10 @@ async def test_initial_pool_full_of_repeats_expands_with_grounded_then_original_
     seen = searches(monkeypatch, {"국제유가": raw, "*": []})
     result = await news_map.build_news_map(center, target=3)
     assert result.status == "complete" and len(result.items) == 3
-    # The center's grounded query runs first; the original relevance search then
-    # continues after raw position 20, not page 1 again.
+    # The user's query continues directly after raw position 20.
     size = settings.news_map_supplement_page_size
-    assert seen[0][0] != "국제유가" and seen[0][1:] == (1, size)
-    assert seen[1] == ("국제유가", 21, size)
-    assert result.stats["initial"] == 19 and result.stats["search_steps"] == 2
+    assert seen == [("국제유가", 21, size)]
+    assert result.stats["initial"] == 19 and result.stats["search_steps"] == 1
     assert result.stats["center_repeats"] == 20  # Reprints never consume neighbour slots.
     assert result.stats["evaluated"] <= settings.news_map_max_candidates
     # Expansion candidates keep the original session/rank for later pools.
@@ -142,6 +140,7 @@ async def test_initial_pool_full_of_repeats_expands_with_grounded_then_original_
 async def test_page_size_change_neither_repeats_nor_skips_raw_positions(monkeypatch, oil_map):
     center, _ = oil_map
     monkeypatch.setattr(settings, "news_map_supplement_page_size", 7)
+    monkeypatch.setattr(settings, "news_map_supplement_max_searches", 1)
     put([cached(repeat(i), i + 2) for i in range(19)])
     raw = [center, *[repeat(i) for i in range(19)], *[repeat(30 + i) for i in range(14)], angle("forecast")]
     seen = searches(monkeypatch, {"국제유가": raw, "*": []})
@@ -151,6 +150,7 @@ async def test_page_size_change_neither_repeats_nor_skips_raw_positions(monkeypa
     # A later map for the same session continues at 28, after the 7-item page.
     other = store.news_cache["repeat-00"]
     seen.clear()
+    monkeypatch.setattr(settings, "news_map_supplement_page_size", 10)
     await news_map.build_news_map(other, target=1)
     assert [start for query, start, _ in seen if query == "국제유가"] == [28]
     assert first.status in {"insufficient", "complete"}
@@ -168,20 +168,20 @@ async def test_pool_order_follows_session_and_rank_not_article_id(monkeypatch, o
     assert result.stats["initial"] == 3
 
 
-async def test_fifty_unique_cap_counts_only_unique_candidates(monkeypatch, oil_map):
+async def test_raw_fifty_cap_does_not_collect_more_to_replace_duplicates(monkeypatch, oil_map):
     center, _ = oil_map
     monkeypatch.setattr(settings, "news_map_supplement_page_size", 50)
     put([cached(repeat(i), i + 2) for i in range(30)])  # 20 initial + 10 cached remainder.
     raw = [center, *[repeat(i) for i in range(60)]]
     seen = searches(monkeypatch, {"국제유가": raw, "*": []})
     result = await news_map.build_news_map(center, target=3)
-    assert result.stats["evaluated"] == 50
-    assert result.status == "insufficient" and result.reason == "candidate_limit"
-    assert result.items == [] and result.stats["center_repeats"] == 50
-    # Raw positions 21-61: reports 19-29 were already pooled and are not unique candidates.
-    assert result.stats["raw"] == 41 and result.stats["raw_duplicates"] == 11
-    assert result.stats["added_cached_pool"] == 10 and result.stats["added_original_next"] == 20
-    assert len(seen) == 2 and seen[1] == ("국제유가", 21, 50)
+    assert result.stats["evaluated"] == 49  # Center consumes one of the 50 raw positions.
+    assert result.status == "insufficient" and result.reason == "search_limit"
+    assert result.items == [] and result.stats["center_repeats"] == 49
+    # Positions 21-31 are already pooled; no request may pass position 50.
+    assert result.stats["raw"] == 30 and result.stats["raw_duplicates"] == 11
+    assert result.stats["added_cached_pool"] == 10 and result.stats["added_original_next"] == 19
+    assert seen == [("국제유가", 21, 30)]
 
 
 async def test_expansion_stops_at_search_budget_and_reports_shortage(monkeypatch, oil_map):
@@ -196,16 +196,18 @@ async def test_expansion_stops_at_search_budget_and_reports_shortage(monkeypatch
     assert result.stats["evaluated"] < settings.news_map_max_candidates
 
 
-async def test_fifty_evaluated_with_valid_shortage_returns_fewer_nodes(monkeypatch, oil_map):
+async def test_two_original_pages_include_position_fifty_but_not_fifty_one(monkeypatch, oil_map):
     center, _ = oil_map
-    monkeypatch.setattr(settings, "news_map_supplement_page_size", 50)
     put([cached(repeat(i), i + 2) for i in range(19)])
-    raw = [*[repeat(100 + i) for i in range(40)], angle("forecast")]
-    searches(monkeypatch, {"*": raw})
+    raw = [center, *[repeat(i) for i in range(48)], angle("forecast"), angle("airlines")]
+    seen = searches(monkeypatch, {"국제유가": raw})
     result = await news_map.build_news_map(center, target=3)
-    assert result.stats["evaluated"] == 50
-    assert neighbour_ids(result) == [] or len(result.items) < 3
-    assert result.status == "insufficient"
+    assert seen == [("국제유가", 21, 20), ("국제유가", 41, 10)]
+    assert result.stats["evaluated"] == 49
+    assert neighbour_ids(result) == ["forecast"]
+    assert store.news_cache["forecast"]["_search_rank"] == 50
+    assert "airlines" not in store.news_cache
+    assert (result.status, result.reason) == ("insufficient", "search_limit")
 
 
 async def test_irrelevant_expansion_candidates_never_fill_slots(monkeypatch, oil_map):
@@ -217,7 +219,7 @@ async def test_irrelevant_expansion_candidates_never_fill_slots(monkeypatch, oil
 
     monkeypatch.setattr(llm, "embed", embed)
     unrelated = [oil(f"house-{i}", f"주택 전세 계약 {i}", "임대차 계약 갱신 사례") for i in range(10)]
-    searches(monkeypatch, {"*": unrelated})
+    searches(monkeypatch, {"국제유가": [center] * 20 + unrelated})
     result = await news_map.build_news_map(center, target=3)
     assert result.items == [] and result.status == "insufficient"
     assert result.stats["below_threshold"] >= 10
@@ -249,7 +251,7 @@ async def test_expansion_timeout_is_partial(monkeypatch, oil_map):
 async def test_expansion_embedding_failure_is_partial_but_first_round_failure_raises(monkeypatch, oil_map):
     center, _ = oil_map
     put([cached(angle("forecast"), 2)])
-    searches(monkeypatch, {"*": [angle("refiners")]})
+    searches(monkeypatch, {"국제유가": [center] * 20 + [angle("refiners")]})
 
     async def embed(text, **kwargs):
         return [] if "정제마진" in text else vec()
@@ -278,9 +280,8 @@ async def test_repeated_request_reuses_search_cache_and_vectors(monkeypatch, oil
     embedded = len(calls)
     second = await news_map.build_news_map(center, target=3)
     assert neighbour_ids(second) == neighbour_ids(first)
-    # Grounded query (empty) + original continuation once; the continued page joined the
-    # original search session, so the next map completes from that pool with no search.
-    assert len(seen) == 2 and second.stats["search_steps"] == 0 and second.stats["embedding_calls"] == 0
+    # The continued page joins the original session; the next map needs no search.
+    assert len(seen) == 1 and second.stats["search_steps"] == 0 and second.stats["embedding_calls"] == 0
     assert second.stats["initial"] == first.stats["evaluated"]
     assert len(calls) == embedded and second.stats["embedding_reused"] > 0
 
@@ -293,7 +294,7 @@ async def test_concurrent_requests_share_one_search(monkeypatch, oil_map):
     async def fetch(query, *, start, size):
         seen.append(query)
         await asyncio.sleep(.01)
-        return page([angle("forecast"), angle("airlines")], start, size)
+        return page([center] * 20 + [angle("forecast"), angle("airlines")], start, size)
 
     monkeypatch.setattr(news_fetcher, "fetch_search_page", fetch)
     a, b = await asyncio.gather(news_map.build_news_map(center, target=3),
@@ -305,7 +306,7 @@ async def test_concurrent_requests_share_one_search(monkeypatch, oil_map):
 async def test_expand_false_reports_expandable_and_full_request_appends(monkeypatch, oil_map):
     center, _ = oil_map
     put([cached(angle("forecast"), 2), *[cached(repeat(i), i + 3) for i in range(5)]])
-    seen = searches(monkeypatch, {"*": [angle("airlines"), angle("opec")]})
+    seen = searches(monkeypatch, {"국제유가": [center] * 20 + [angle("airlines"), angle("opec")]})
     initial = await news_map.build_news_map(center, target=3, expand=False)
     assert initial.status == "expandable" and seen == []
     full = await news_map.build_news_map(center, target=3)
@@ -313,16 +314,14 @@ async def test_expand_false_reports_expandable_and_full_request_appends(monkeypa
     assert full.status == "complete"
 
 
-async def test_grounded_query_precedes_original_and_never_repeats_it(monkeypatch, oil_map):
+async def test_title_and_keywords_never_change_the_original_search_query(monkeypatch, oil_map):
     center, _ = oil_map
+    center["keywords"] = ["소비자 반응", "국제유가", "HBM3E"]
     put([cached(repeat(i), i + 2) for i in range(3)])
-    seen = searches(monkeypatch, {"국제유가": [repeat(i) for i in range(30)], "*": [angle("forecast")]})
+    seen = searches(monkeypatch, {"국제유가": [repeat(i) for i in range(60)], "*": [angle("forecast")]})
     result = await news_map.build_news_map(center, target=1)
-    # The grounded query found a meaningful neighbour, so no continuation was needed.
-    assert len(seen) == 1 and seen[0][0] != "국제유가" and seen[0][1] == 1
-    assert neighbour_ids(result) == ["forecast"]
-    # Grounded-query results keep their own search membership.
-    assert store.news_cache["forecast"]["_search_keyword"] == seen[0][0]
+    assert seen == [("국제유가", 21, 20), ("국제유가", 41, 10)]
+    assert result.items == [] and result.reason == "search_limit"
 
 
 async def test_legacy_fallback_provider_is_not_used_for_expansion(monkeypatch, oil_map):
@@ -371,7 +370,7 @@ async def test_expansion_adds_no_generation_body_or_rag_calls(monkeypatch, oil_m
     monkeypatch.setattr(article_metadata, "generate", forbidden)
     from app.agents import diffbot_client
     monkeypatch.setattr(diffbot_client, "extract_article", forbidden, raising=False)
-    searches(monkeypatch, {"*": [angle("forecast")]})
+    searches(monkeypatch, {"국제유가": [center] * 20 + [angle("forecast")]})
     result = await news_map.build_news_map(center, target=1)
     assert neighbour_ids(result) == ["forecast"]
     assert len(saved) == 1 and "embedding" not in saved[0]
@@ -382,7 +381,7 @@ async def test_expansion_adds_no_generation_body_or_rag_calls(monkeypatch, oil_m
 async def test_diagnostic_log_has_counts_without_titles_queries_or_vectors(monkeypatch, oil_map, caplog):
     center, _ = oil_map
     put([cached(repeat(1), 2)])
-    searches(monkeypatch, {"*": [angle("forecast")]})
+    searches(monkeypatch, {"국제유가": [center] * 20 + [angle("forecast")]})
     with caplog.at_level(logging.INFO, logger="econmind.news_map"):
         await news_map.build_news_map(center, target=1)
     line = next(r.getMessage() for r in caplog.records if r.name == "econmind.news_map")
@@ -443,7 +442,7 @@ def test_first_round_embedding_failure_is_503(monkeypatch, oil_map):
         assert response.status_code == 503 and "private" not in response.text
 
 
-# ── search cache and query grounding ────────────────────────────────────────
+# ── search cache and raw-position bounds ────────────────────────────────────
 
 async def test_cached_search_single_flight_expiry_failure_and_no_mutation():
     calls = []
@@ -475,14 +474,54 @@ async def test_cached_search_single_flight_expiry_failure_and_no_mutation():
     assert calls.count("실패") == 1  # Failure is cached briefly as a failure, not as empty data.
 
 
-def test_grounded_queries_do_not_invent_angles_or_ungrounded_metadata():
-    center = oil("center", *OIL_CENTER, )
-    center["keywords"] = ["소비자 반응", "국제유가", "HBM3E"]
-    queries = related_candidates.grounded_queries(center)
-    assert queries and len(queries) == len(set(queries))
-    assert all("소비자" not in q and "HBM3E" not in q and len(q) <= 100 for q in queries)
-    assert all(q != center["_search_keyword"] for q in queries)
-    assert related_candidates.grounded_queries(oil("empty", "", "")) == []
+async def test_old_cached_results_after_position_fifty_are_not_selected(monkeypatch, oil_map):
+    center, _ = oil_map
+    put([cached(repeat(i), i + 2) for i in range(19)])
+    put([cached(angle("forecast"), 51, end=70)])
+    seen = searches(monkeypatch, {"국제유가": [center] * 60})
+    result = await news_map.build_news_map(center, target=1)
+    assert result.items == []
+    assert result.stats["initial"] == 19
+    assert all(start + size - 1 <= 50 for _, start, size in seen)
+
+
+async def test_original_search_already_at_fifty_does_not_expand(monkeypatch, oil_map):
+    center, _ = oil_map
+    center["_search_end"] = 50
+    seen = searches(monkeypatch, {"*": [angle("forecast")]})
+    for expand in (False, True):
+        result = await news_map.build_news_map(center, target=1, expand=expand)
+        assert result.status == "insufficient"
+    assert seen == []
+
+
+async def test_filtering_does_not_extend_search_past_fifty(monkeypatch, oil_map):
+    center, _ = oil_map
+    put([cached(repeat(i), i + 2) for i in range(19)])
+    seen = searches(monkeypatch, {"국제유가": [center, *[repeat(i) for i in range(60)]]})
+
+    async def reject_all(articles):
+        return []
+
+    monkeypatch.setattr(news_fetcher, "inspect_search_articles", reject_all)
+    result = await news_map.build_news_map(center, target=1)
+    assert seen == [("국제유가", 21, 20), ("국제유가", 41, 10)]
+    assert result.stats["evaluated"] == 19 and result.stats["filtered"] == 30
+    assert result.items == [] and result.reason == "search_limit"
+
+
+async def test_map_query_cursor_reaches_fifty_and_is_reused_on_later_requests(monkeypatch, oil_map):
+    center, _ = oil_map
+    pool = [center, *[cached(repeat(i), i + 2) for i in range(19)]]
+    center["_search_keyword"] = "다른 검색"
+    seen = searches(monkeypatch, {"원유": [center, *[repeat(i) for i in range(60)]]})
+    context = {"query": "원유", "observed_at": SESSION, "raw_end": 20, "next_positions": {"원유": 21}}
+    first = await news_map.build_news_map(center, target=4, pool=pool, search_context=context)
+    assert seen == [("원유", 21, 20), ("원유", 41, 10)]
+    assert context["next_positions"] == {"원유": 51}
+    assert (first.status, first.reason) == ("insufficient", "search_limit")
+    await news_map.build_news_map(center, target=4, pool=pool, search_context=context)
+    assert len(seen) == 2  # Restoring this map cannot restart or pass its search window.
 
 
 @pytest.mark.parametrize("key,value", [

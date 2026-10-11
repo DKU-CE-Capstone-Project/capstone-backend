@@ -1,13 +1,15 @@
 # EconMind Backend
 
 실시간 경제 뉴스 검색·뉴스맵·AI 리포트 API. FastAPI / Python 3.11 이상.
-프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 이 README의 뉴스맵 품질·성능 검증 기록은 2026-10-01~02 로컬 작업을 설명하며, 아래 세션·소유권·요청 한도는 2026-10-10 변경 사항이다. [API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)의 과거 계약과 날짜별 추가 내용을 구분해 읽는다. 소스 병합과 실제 운영 배포는 별도로 확인해야 한다.
+프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 최신 로컬 범위는 아래 2026-10-11 v2 구현과 현재 작업 트리이며, 2026-10-01~10 설명·검증 수치는 각 날짜의 기록이다. 정본 `docs/14-newsmap-v2-implementation.md`와 `docs/99-verification.md`에 현재 네 저장소의 상태와 검증 범위를 함께 기록했다. 소스 병합과 실제 운영 배포는 별도로 확인해야 한다.
 
 ## 뉴스맵·리포트 API v2 로컬 구현 (2026-10-11)
 
-최신 `origin/main/a0d75e3`에서 시작한 `codex/newsmap-v2-20261011` 구현이다. 기준 설계는 정본의 [요구사항](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/09-newsmap-prototype-data-requirements.md), [API v2](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/10-newsmap-prototype-api-design.md), [DB](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/11-newsmap-prototype-db-design.md)(2026-10-04)다. 아래 v1 설명과 검증 수치는 각 날짜의 기록이며, 이번 구현은 원격 병합·배포 기록이 아니다.
+2026-10-11 확인한 `origin/main/a0d75e3`에서 시작한 `codex/newsmap-v2-20261011` 구현이다. 문서 동기화 때 확인한 기준 커밋은 `9451057`이고, 아래 검색 범위 제한은 그 이후 작업 트리 변경까지 포함한다. 기준 설계는 정본의 [요구사항](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/09-newsmap-prototype-data-requirements.md), [API v2](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/10-newsmap-prototype-api-design.md), [DB](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/11-newsmap-prototype-db-design.md)(초안 2026-10-04)다. 아래 v1 설명과 검증 수치는 각 날짜의 기록이며, 이번 구현은 원격 병합·배포 기록이 아니다.
 
 - `/api/v2/session`과 `/maps`는 서버 쿠키 세션에 속한다. JSON에는 공개 `session_epoch`만 제공한다. 맵별 검색 후보·다음 검색 위치·이전 표시 기사·트리를 Redis에 저장하고 revision CAS로 늦은 변경을 거부한다. 초기 주변 목표는 4건, 하위 가지는 3건이며 재검색 0건은 기존 가지를 유지한다. 초기화해도 노드 ID를 재사용하지 않는다.
+- 추가 검색은 원래 검색어의 다음 결과만 사용한다. 기본 최초 1~20건으로 목표를 채우지 못하면 21~40건, 여전히 부족하면 41~50건을 요청하고 멈춘다. 제목·키워드를 조합한 검색어 생성은 제거했다. 50번째는 필터 전 원시 검색 위치의 상한이며, 중복·분류 제외로 부족해도 51번째를 검색하지 않는다. 이미 저장된 51번째 이후 후보도 선정하지 않는다. v1/v2와 Decision/embedding 공통 수집 정책이며 관련성·반복 제외·선정 기준은 유지한다.
+- 최초 중심은 허용된 검색 결과의 첫 기사다. 주변이 부족하다고 중심을 자동 교체하지 않는다. 중심 재선정·이슈별 후보 선택·Decision 임계값 조정·본문 입력 보강은 시뮬레이션/검토 후 보류했으며 미적용이다. 초기 4건·하위 3건은 목표이고 보장 개수가 아니다.
 - `NEWS_MAP_SELECTOR=decision`은 기존 main의 Decision 질문·중복 제외·호출/시간 예산·캐시를 그대로 사용한다. 기본 selector는 기존 `embedding`이다. FREE는 분석 기사 1건, PAID 데모는 `PROTOTYPE_TIER=PAID`와 `PAID_DEMO_ENABLED=true`를 모두 명시할 때만 최대 10건이다.
 - `POST /api/v2/report-jobs`는 UUID `Idempotency-Key`와 revision을 검사하고 Redis에서 맵·작업·재시도 키를 함께 접수한다. NATS `reports.generate.v2`의 영속 발행 응답을 받은 뒤 202를 반환한다. GET 작업 조회와 POST 취소를 제공하며, 별도 v2 워커는 본문 추출·리포트·검증·전략 단계마다 세션·취소·소유권을 확인한다.
 - `/api/v2/reports/{id}`와 `/strategies/{id}`는 허용된 세션에서만 조회한다. 실제 추출 본문은 불변 `news_bodies`에 저장하고 v2 결과는 본문 ID·해시·입력 발췌·성공/실패 기사·coverage를 기록한다. 결과 JSON에는 내부 발췌를 반환하지 않는다. 전체 근거·생성 설정·RAG·전략 옵션이 같은 경우에만 MongoDB 결과를 재사용한다. 부분 본문 성공은 완전 성공 캐시에 넣지 않으며 전략 실패 시 완성된 리포트를 유지한다.
@@ -89,7 +91,9 @@ ECONMIND_V2_SCHEMA_FILE=../capstone-deploy-main-integration/scripts/lib/newsmap-
   .venv/bin/python -m pytest -q
 ```
 
-위 schema 경로는 이번 형제 worktree 배치 기준이다. 다른 체크아웃에서는 배포 저장소의 실제 절대 경로로 바꾼다. 서비스 테스트는 loopback 포트만 허용하고 임의의 테스트 DB·NATS stream과 세션 키만 생성·정리한다. 실제 Redis 원자 접수/완료·세션 삭제 경합·NATS 영속 접수/소비·MongoDB BSON 시각/불변 근거/재시작 후 재사용을 검증한다. 외부 뉴스·Decision·Diffbot·LLM은 fixture/mock이며 실제 공급자 품질·운영 DB·Atlas RAG·운영 배포는 이번 검증 범위에 포함하지 않는다. 정본 문서는 이번 코드 작업에서 자동 갱신하지 않았다.
+위 schema 경로는 이번 형제 worktree 배치 기준이다. 다른 체크아웃에서는 배포 저장소의 실제 절대 경로로 바꾼다. 서비스 테스트는 loopback 포트만 허용하고 임의의 테스트 DB·NATS stream과 세션 키만 생성·정리한다. 실제 Redis 원자 접수/완료·세션 삭제 경합·NATS 영속 접수/소비·MongoDB BSON 시각/불변 근거/재시작 후 재사용을 검증한다. 외부 뉴스·Decision·Diffbot·LLM은 fixture/mock이며 실제 공급자 품질·운영 DB·Atlas RAG·운영 배포는 이 서비스 테스트 범위에 포함하지 않는다. 정본 문서는 2026-10-11 별도 문서 동기화 요청에 따라 갱신했다.
+
+2026-10-11 문서 동기화 시 현재 작업 트리에서 서비스 opt-in을 끈 `.venv/bin/python -m pytest -q`를 다시 실행해 **440 passed, 15 skipped, 경고 3건**을 확인했다. 15건은 별도 MongoDB·Redis·v2 로컬 서비스가 필요한 선택 검사다. 외부 API·실제 DB 검사는 이번에 재실행하지 않았다. 아래 447건 및 앞의 452건은 당시 코드와 서비스 opt-in을 사용한 과거 실행 기록으로, 현재 오프라인 결과와 합산하지 않는다.
 
 2026-10-11 이 PC의 Python 3.13.5에서 기존 MongoDB 회귀와 두 v2 서비스 opt-in을 함께 켠 전체 테스트는 **447 passed, skipped 0**이었다. 기존 MongoDB 테스트의 과거 그룹 응답 참조를 현재 main의 `items` 계약으로 바로잡아 기존 후보/벡터 저장·재시작 검사를 함께 실행했다. 기존 FastAPI/Starlette 사용 중단 예정 API 경고 3건이 남아 있다. 관련 Ruff 검사와 `git diff --check`는 통과했다.
 

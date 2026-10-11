@@ -59,11 +59,13 @@ def setup_expansion(monkeypatch, center, candidate, additions):
     monkeypatch.setattr(settings, "news_map_supplement_max_searches", 1)
     store.news_cache.update({a["news_id"]: a for a in (center, candidate)})
     calls = []
+    raw = [center] * 20 + additions + [center] * 40
 
     async def fetch(query, *, start, size):
         calls.append((query, start, size))
-        articles = deepcopy(additions[start - 1:start - 1 + size])
-        return NaverNewsPage(articles=articles, total=len(additions), start=start,
+        articles = [{**deepcopy(a), "_search_rank": start + i}
+                    for i, a in enumerate(raw[start - 1:start - 1 + size])]
+        return NaverNewsPage(articles=articles, total=len(raw), start=start,
                              end=start + len(articles) - 1)
 
     async def inspect(articles):
@@ -211,7 +213,7 @@ def test_related_graph_withhold_expand_and_report_the_same_shortage(monkeypatch,
     }
     assert initial_related["related_news"] == [] and len(initial_graph["nodes"]) == 1
     related, graph = request("related", True), request("graph", True)
-    assert len(calls) == 1  # The second endpoint reuses the mocked search page cache.
+    assert calls == [(center["_search_keyword"], 21, 20), (center["_search_keyword"], 41, 10)]
     assert related["selection"] == graph["selection"] == {
         "status": "insufficient", "reason": "search_limit", "requested": requested, "returned": 1,
     }
