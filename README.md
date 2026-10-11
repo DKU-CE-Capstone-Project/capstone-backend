@@ -1,7 +1,101 @@
 # EconMind Backend
 
 실시간 경제 뉴스 검색·뉴스맵·AI 리포트 API. FastAPI / Python 3.11 이상.
-프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 이 README의 뉴스맵 품질·성능 검증 기록은 2026-10-01~02 로컬 작업을 설명하며, 아래 세션·소유권·요청 한도는 2026-10-10 변경 사항이다. [API 명세](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/07-api-spec.md)의 과거 계약과 날짜별 추가 내용을 구분해 읽는다. 소스 병합과 실제 운영 배포는 별도로 확인해야 한다.
+프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 최신 로컬 범위는 아래 2026-10-11 v2 구현과 현재 작업 트리이며, 2026-10-01~10 설명·검증 수치는 각 날짜의 기록이다. 정본 `docs/14-newsmap-v2-implementation.md`와 `docs/99-verification.md`에 현재 네 저장소의 상태와 검증 범위를 함께 기록했다. 소스 병합과 실제 운영 배포는 별도로 확인해야 한다.
+
+## 뉴스맵·리포트 API v2 로컬 구현 (2026-10-11)
+
+2026-10-11 확인한 `origin/main/a0d75e3`에서 시작한 `codex/newsmap-v2-20261011` 구현이다. 문서 동기화 때 확인한 기준 커밋은 `9451057`이고, 아래 검색 범위 제한은 그 이후 작업 트리 변경까지 포함한다. 기준 설계는 정본의 [요구사항](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/09-newsmap-prototype-data-requirements.md), [API v2](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/10-newsmap-prototype-api-design.md), [DB](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/11-newsmap-prototype-db-design.md)(초안 2026-10-04)다. 아래 v1 설명과 검증 수치는 각 날짜의 기록이며, 이번 구현은 원격 병합·배포 기록이 아니다.
+
+- `/api/v2/session`과 `/maps`는 서버 쿠키 세션에 속한다. JSON에는 공개 `session_epoch`만 제공한다. 맵별 검색 후보·다음 검색 위치·이전 표시 기사·트리를 Redis에 저장하고 revision CAS로 늦은 변경을 거부한다. 초기 주변 목표는 4건, 하위 가지는 3건이며 재검색 0건은 기존 가지를 유지한다. 초기화해도 노드 ID를 재사용하지 않는다.
+- 추가 검색은 원래 검색어의 다음 결과만 사용한다. 기본 최초 1~20건으로 목표를 채우지 못하면 21~40건, 여전히 부족하면 41~50건을 요청하고 멈춘다. 제목·키워드를 조합한 검색어 생성은 제거했다. 50번째는 필터 전 원시 검색 위치의 상한이며, 중복·분류 제외로 부족해도 51번째를 검색하지 않는다. 이미 저장된 51번째 이후 후보도 선정하지 않는다. v1/v2와 Decision/embedding 공통 수집 정책이며 관련성·반복 제외·선정 기준은 유지한다.
+- 최초 중심은 허용된 검색 결과의 첫 기사다. 주변이 부족하다고 중심을 자동 교체하지 않는다. 중심 재선정·이슈별 후보 선택·Decision 임계값 조정·본문 입력 보강은 시뮬레이션/검토 후 보류했으며 미적용이다. 초기 4건·하위 3건은 목표이고 보장 개수가 아니다.
+- `NEWS_MAP_SELECTOR=decision`은 기존 main의 Decision 질문·중복 제외·호출/시간 예산·캐시를 그대로 사용한다. 기본 selector는 기존 `embedding`이다. FREE는 분석 기사 1건, PAID 데모는 `PROTOTYPE_TIER=PAID`와 `PAID_DEMO_ENABLED=true`를 모두 명시할 때만 최대 10건이다.
+- `POST /api/v2/report-jobs`는 UUID `Idempotency-Key`와 revision을 검사하고 Redis에서 맵·작업·재시도 키를 함께 접수한다. NATS `reports.generate.v2`의 영속 발행 응답을 받은 뒤 202를 반환한다. GET 작업 조회와 POST 취소를 제공하며, 별도 v2 워커는 본문 추출·리포트·검증·전략 단계마다 세션·취소·소유권을 확인한다.
+- `/api/v2/reports/{id}`와 `/strategies/{id}`는 허용된 세션에서만 조회한다. 실제 추출 본문은 불변 `news_bodies`에 저장하고 v2 결과는 본문 ID·해시·입력 발췌·성공/실패 기사·coverage를 기록한다. 결과 JSON에는 내부 발췌를 반환하지 않는다. 전체 근거·생성 설정·RAG·전략 옵션이 같은 경우에만 MongoDB 결과를 재사용한다. 부분 본문 성공은 완전 성공 캐시에 넣지 않으며 전략 실패 시 완성된 리포트를 유지한다.
+- 기존 v1 API와 세션 발급/사용량 제한, HttpOnly·Secure/SameSite 설정, Origin 검사, Redis 필수 기본값은 유지한다. 신규 SID 발급은 Redis NX, 기존 세션 저장은 XX로 제한해 삭제와 겹친 v1/v2 변경 요청이 폐기한 SID를 되살리지 못한다. `V2_STATE_MEMORY=true`는 `SESSION_STORE_REQUIRED=false`인 명시적 로컬 fixture에서만 허용한다. 일반 v2 저장소 장애를 메모리 성공 결과로 대체하지 않는다.
+
+### 격리된 로컬 서비스와 실행
+
+배포 저장소의 `compose.local-test.yaml`을 `--env-file /dev/null`로 실행하면 운영 계정·볼륨을 읽지 않고 loopback MongoDB·Redis·NATS를 만든다. 신규 DB에 v2 validator와 인덱스를 적용한다. 기존 DB의 dry-run/apply/rollback은 배포 저장소 README를 따른다. 앱 시작에서 기존 DB 문서를 자동 변환하지 않는다.
+
+```bash
+# 배포 저장소에서
+docker compose --env-file /dev/null -f compose.local-test.yaml up -d --wait
+
+# 백엔드 저장소에서, API와 별도 워커에 같은 환경을 설정
+export MONGODB_URI=mongodb://127.0.0.1:27218
+export MONGODB_DB_NAME=econmind_v2_local_test
+export USE_MONGODB=true MONGODB_REQUIRED=true
+export REDIS_URL=redis://127.0.0.1:6388/0
+export NATS_URL=nats://127.0.0.1:4233
+export SESSION_STORE_REQUIRED=true V2_STATE_MEMORY=false
+export PROTOTYPE_TIER=FREE PAID_DEMO_ENABLED=false
+export USE_RAG=false  # 로컬 MongoDB에는 Atlas Vector Search가 없음
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+# 같은 환경의 다른 터미널에서
+.venv/bin/python -m app.v2.report_worker
+```
+
+실제 뉴스 검색·Decision·본문 추출·AI 생성에는 각 외부 API 키가 필요하다. 키는 git에서 제외한 기존 환경 파일에만 두고 프론트에 전달하지 않는다. 로컬 HTTP UI fixture는 프론트 저장소 README를 따른다.
+
+### 실제 NAVER·Decision 탐색 프로파일
+
+현재 로컬 프로토타입은 다중 선택을 위해 PAID 기준(최대 10건)으로 실행한다. 아래 실행 스크립트의 기본값은 `--tier PAID`이며 로컬 PAID 데모 설정을 함께 활성화한다. 무료 동작 검증은 API와 워커에 `--tier FREE`를 지정한다. 일반 앱의 FREE 기본값과 서버의 PAID 데모 승인 조건은 유지한다.
+
+2026-10-11 실제 NCP NAVER 검색·페이지 분류/이미지와 [OpenAI Decisions 공식 계약](https://developers.openai.com/api/docs/guides/decisions)(`gpt-6-luna`)으로 v2 초기 선정·하위 확장·세션 복원을 검증했다. `scripts/run-newsmap-v2-local.py`는 기존 `.env`에서 NAVER 두 키와 OPENAI_API_KEY(OAI_KEY 호환)만 읽으며 파일을 변경하거나 키를 출력하지 않는다. DB·Redis·NATS는 위 격리 서비스로 고정하고 mock을 끈다. 탐색의 규칙 메타데이터만 사용하며 Gemini·Diffbot 키는 이 프로파일에 전달하지 않는다. Decision의 기존 질문·임계값·20→50 후보/3단계/시간/호출 상한은 유지한다.
+
+```bash
+# 격리 서비스가 실행 중인 백엔드 저장소에서
+.venv/bin/python scripts/run-newsmap-v2-local.py --port 8026
+# 다른 터미널에서 실제 요청 검증 (외부 API 호출이 발생)
+.venv/bin/python scripts/verify-newsmap-v2-live.py --query 반도체 --output /tmp/econmind-v2-live.json
+# 프론트 저장소에서
+npm run dev:live
+# http://127.0.0.1:5196
+```
+
+실제 HTTP 결과: 국제유가 초기 주변 **2/4**(정상 부족 `search_limit`), 하위 **3/3**; 반도체 초기 **4/4**, 하위 **3/3**. 반도체 신규 접수는 약 13.65초, 하위 요청은 약 10.35초였다. 네 선정에서 Decision 성공 147회·입력 167,351토큰, 뉴스맵 임베딩 호출 0회를 확인했다. 선택 수를 맞추려고 합성 기사를 넣거나 임계값을 낮추지 않았다. GET 복원·다른 세션 404·삭제 204도 실제 HTTP로 확인했고, UI에서 같은 실제 기사·설명·원문 링크와 하위 가지/새로고침 복원을 확인했다. 연동과 소표본 결과 검증이며 전반적인 선정 품질 평가나 본문·리포트·전략·Atlas RAG·운영 배포 검증은 아니다.
+
+### 실제 리포트 생성 프로파일과 디버깅 (2026-10-11)
+
+위 기본 실행은 탐색 전용이다. 리포트를 생성하려면 API와 워커를 아래처럼 함께 실행한다. 두 프로세스 모두 같은 loopback MongoDB·Redis·NATS를 사용하며, `.env`에서는 기존 탐색 키에 더해 `GOOGLE_API_KEY`와 `DIFFBOT_TOKEN`(`DIFFBOT_API_KEY` 호환)만 읽는다. 키·파일·운영 DB 설정은 변경하지 않는다. Gemini 모델·Flex 설정은 기존 기본값을 유지하고 critic은 활성화한다. 로컬 MongoDB에 Atlas Vector Search가 없어 RAG는 비활성화한다.
+
+```bash
+# API 터미널 (탐색 전용 API가 같은 포트에서 실행 중이면 먼저 종료)
+.venv/bin/python scripts/run-newsmap-v2-local.py --port 8026 --with-reports
+# 별도 워커 터미널
+.venv/bin/python scripts/run-newsmap-v2-local.py --worker
+# 프론트 저장소: npm run dev:live
+```
+
+실제 FREE 세션에서 환율 기사 두 건을 각각 선택해 Diffbot 본문 **6,081자 / 1,635자** 추출, Gemini 리포트·critic·전략 생성, MongoDB 저장, UI 표시까지 완료했다. 신규 작업은 약 **8.42초 / 9.27초**, 모두 coverage 1/1·실패 0건·critic `passed`였다. 첫 실행에서 기존 전략 프롬프트가 본문에 없는 ETF·종목을 추가하는 문제를 발견했다. v2는 리포트의 사건·시장 영향·종목 영향·리스크·검증 제한을 JSON으로 전달하는 별도 프롬프트로 변경했고, 전략 대상 이름·ticker가 리포트의 `stock_impacts`에 없는 응답은 저장하지 않는다. 종목 없는 리포트는 빈 전략 목록으로 응답할 수 있다. `strategy-grounded-v3` 캐시 키로 과거 전략을 재사용하지 않으며, 전략 실패 시 기존 리포트를 유지한다.
+
+동일 기사 재요청은 본문·리포트를 재사용하고 수정된 전략만 생성했다(약 1.75초). DB 본문 해시·입력 발췌·출처·BSON 시각·리포트/전략 연결을 확인했고, 타 세션 결과 조회는 모두 404였다. 새로고침에서는 GET만 발생했고 기존 결과를 복원했다. 이 검증은 실제 기사 2건의 연동 소표본이며, PAID 다중 기사 생성·Atlas RAG·전반적 투자 분석 품질·운영 배포 검증은 아니다. 변경 후 격리 서비스 opt-in을 포함한 백엔드 전체 검사는 **452 passed, skipped 0**였다.
+
+### 검증 명령과 범위
+
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check app/api/v2 app/v2 app/main.py app/session.py app/config.py app/agents/news_map.py app/agents/diffbot_client.py app/agents/strategy_generator.py tests/test_v2*.py tests/test_session_revocation.py
+ECONMIND_V2_TEST_REDIS_URL=redis://127.0.0.1:6388/0 \
+  .venv/bin/python -m pytest -q tests/test_v2_state_redis.py
+ECONMIND_V2_LOCAL_SERVICES=1 \
+ECONMIND_V2_SCHEMA_FILE=../capstone-deploy-main-integration/scripts/lib/newsmap-v2-schema.json \
+  .venv/bin/python -m pytest -q tests/test_v2_reports_local_services.py
+# 기존 뉴스맵 MongoDB 회귀까지 포함한 전체 로컬 검사
+NEWS_MAP_TEST_MONGODB_URI=mongodb://127.0.0.1:27218 \
+ECONMIND_V2_LOCAL_SERVICES=1 \
+ECONMIND_V2_TEST_REDIS_URL=redis://127.0.0.1:6388/0 \
+ECONMIND_V2_SCHEMA_FILE=../capstone-deploy-main-integration/scripts/lib/newsmap-v2-schema.json \
+  .venv/bin/python -m pytest -q
+```
+
+위 schema 경로는 이번 형제 worktree 배치 기준이다. 다른 체크아웃에서는 배포 저장소의 실제 절대 경로로 바꾼다. 서비스 테스트는 loopback 포트만 허용하고 임의의 테스트 DB·NATS stream과 세션 키만 생성·정리한다. 실제 Redis 원자 접수/완료·세션 삭제 경합·NATS 영속 접수/소비·MongoDB BSON 시각/불변 근거/재시작 후 재사용을 검증한다. 외부 뉴스·Decision·Diffbot·LLM은 fixture/mock이며 실제 공급자 품질·운영 DB·Atlas RAG·운영 배포는 이 서비스 테스트 범위에 포함하지 않는다. 정본 문서는 2026-10-11 별도 문서 동기화 요청에 따라 갱신했다.
+
+2026-10-11 문서 동기화 시 현재 작업 트리에서 서비스 opt-in을 끈 `.venv/bin/python -m pytest -q`를 다시 실행해 **440 passed, 15 skipped, 경고 3건**을 확인했다. 15건은 별도 MongoDB·Redis·v2 로컬 서비스가 필요한 선택 검사다. 외부 API·실제 DB 검사는 이번에 재실행하지 않았다. 아래 447건 및 앞의 452건은 당시 코드와 서비스 opt-in을 사용한 과거 실행 기록으로, 현재 오프라인 결과와 합산하지 않는다.
+
+2026-10-11 이 PC의 Python 3.13.5에서 기존 MongoDB 회귀와 두 v2 서비스 opt-in을 함께 켠 전체 테스트는 **447 passed, skipped 0**이었다. 기존 MongoDB 테스트의 과거 그룹 응답 참조를 현재 main의 `items` 계약으로 바로잡아 기존 후보/벡터 저장·재시작 검사를 함께 실행했다. 기존 FastAPI/Starlette 사용 중단 예정 API 경고 3건이 남아 있다. 관련 Ruff 검사와 `git diff --check`는 통과했다.
 
 ## 세션·결과 접근과 사용량 제한 (2026-10-10)
 

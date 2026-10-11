@@ -106,6 +106,20 @@ class Settings(BaseSettings):
     # 프론트와 API가 다른 출처면 "none"(+secure=true) 필요. 같은 출처면 "lax"로 충분.
     session_cookie_samesite: str = "lax"
 
+    # v2 uses shared Redis and immutable MongoDB results. Memory mode is an
+    # explicit, single-process fixture option, never an outage fallback.
+    prototype_tier: Literal["FREE", "PAID"] = "FREE"
+    v2_state_memory: bool = False
+    v2_max_maps: int = Field(default=10, ge=1, le=100)
+    v2_max_map_nodes: int = Field(default=100, ge=5, le=500)
+    v2_max_map_depth: int = Field(default=5, ge=1, le=10)
+    v2_branch_history_limit: int = Field(default=100, ge=4, le=1000)
+    v2_body_timeout_seconds: float = Field(default=30, gt=0, le=120)
+    v2_body_concurrency: int = Field(default=3, ge=1, le=10)
+    v2_body_cache_seconds: int = Field(default=3600, ge=1, le=86400)
+    v2_job_timeout_seconds: int = Field(default=1800, ge=30, le=3600)
+    v2_job_ttl_seconds: int = Field(default=86400, ge=60, le=86400)
+
     # ── AI 에이전트 (RAG 그라운딩 + 검증) ────────────────────────────────
     embedding_model: str = "gemini-embedding-001"  # Gemini 임베딩 (768차원 요청, generate와 별도 쿼터)
     # Existing embedding/MMR remains available; local Decision runs opt in.

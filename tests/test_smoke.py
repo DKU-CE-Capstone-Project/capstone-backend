@@ -344,10 +344,10 @@ def test_changing_center_resets_expansion() -> None:
 
     from app import session as session_store
 
-    sid = "test-sid-reset"
     asyncio.get_event_loop_policy().new_event_loop()
 
     async def scenario():
+        sid = await session_store.issue("127.0.0.1")
         await session_store.record_center(sid, "center1")
         await session_store.expand_node(sid, "x1")
         state = await session_store.load(sid)

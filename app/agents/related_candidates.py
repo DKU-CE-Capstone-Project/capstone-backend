@@ -1,8 +1,7 @@
-"""Grounded supplemental queries and bounded, process-local search page single-flight."""
+"""Bounded, process-local original-search page cache and single-flight."""
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
@@ -10,8 +9,6 @@ from copy import deepcopy
 from typing import Any
 from weakref import WeakKeyDictionary
 
-from app.agents.article_embeddings import clean_text
-from app.agents.article_metadata import STOPWORDS, _grounded
 from app.agents.naver_client import NaverNewsError, NaverNewsPage
 from app.config import settings
 
@@ -23,40 +20,6 @@ CACHE_SIZE = 128
 
 def query_key(value: str) -> str:
     return " ".join(value.casefold().split())
-
-
-def grounded_queries(center: dict[str, Any]) -> list[str]:
-    """Use supplied title/description/grounded metadata only, no invented angles."""
-    title = clean_text(center.get("title"))[:500]
-    description = clean_text(center.get("description"))[:6000]
-    text = f"{title} {description}"
-    # Keep literal model numbers, proper nouns and their original spelling/order.
-    title_words = re.findall(r"[가-힣a-zA-Z0-9]+(?:[-+][a-zA-Z0-9]+)*", title)
-    anchors = [w for w in title_words if len(w) >= 2 and w.casefold() not in STOPWORDS
-               and not re.search(r"공개|발표|선보|출시|했다|한다|밝혔|신제품", w)]
-    metadata = [clean_text(w) for w in center.get("keywords") or []
-                if isinstance(w, str) and _grounded(w, text) and w.casefold() not in STOPWORDS]
-    # Metadata can only add text actually present, even when a canonical alias is grounded.
-    metadata = [w for w in metadata if w.casefold() in text.casefold()]
-    proposals = [" ".join(anchors[:4]), " ".join(dict.fromkeys([*anchors[:2], *metadata[:3]])),
-                 " ".join(title_words[:10])]
-    if not title_words:
-        proposals = [" ".join(metadata[:4])]
-    seen = {query_key(clean_text(center.get("_search_keyword")))}
-    queries = []
-    for proposal in proposals:
-        # Whole supplied terms only, within the search API's 100-character contract.
-        words = []
-        for word in proposal.split():
-            if len(" ".join([*words, word])) > 100:
-                break
-            words.append(word)
-        query = " ".join(words)
-        key = query_key(query)
-        if len(query) >= 2 and key not in seen:
-            seen.add(key)
-            queries.append(query)
-    return queries
 
 
 async def cached_search(

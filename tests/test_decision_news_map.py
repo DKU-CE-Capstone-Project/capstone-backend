@@ -253,12 +253,12 @@ def test_related_and_graph_share_decisions_without_embeddings(enabled, monkeypat
     assert "same_story" not in json.dumps(related)
 
 
-async def test_shortage_only_expands_until_candidate_budget(enabled, monkeypatch):
+async def test_shortage_only_expands_through_original_position_fifty(enabled, monkeypatch):
     calls = mock_http(monkeypatch)
     center = seed([f"repeat{i}" for i in range(60)])
     result = await news_map.build_news_map(center, target=3)
-    assert result.stats["evaluated"] == 50 and len(calls) == 50
-    assert result.stats["center_repeats"] == 50 and not result.items
+    assert result.stats["evaluated"] == 49 and len(calls) == 49
+    assert result.stats["center_repeats"] == 49 and not result.items
     assert result.status == "insufficient"
 
 
