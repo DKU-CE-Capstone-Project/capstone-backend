@@ -39,6 +39,8 @@ export USE_RAG=false  # 로컬 MongoDB에는 Atlas Vector Search가 없음
 
 ### 실제 NAVER·Decision 탐색 프로파일
 
+현재 로컬 프로토타입은 다중 선택을 위해 PAID 기준(최대 10건)으로 실행한다. 아래 실행 스크립트의 기본값은 `--tier PAID`이며 로컬 PAID 데모 설정을 함께 활성화한다. 무료 동작 검증은 API와 워커에 `--tier FREE`를 지정한다. 일반 앱의 FREE 기본값과 서버의 PAID 데모 승인 조건은 유지한다.
+
 2026-10-11 실제 NCP NAVER 검색·페이지 분류/이미지와 [OpenAI Decisions 공식 계약](https://developers.openai.com/api/docs/guides/decisions)(`gpt-6-luna`)으로 v2 초기 선정·하위 확장·세션 복원을 검증했다. `scripts/run-newsmap-v2-local.py`는 기존 `.env`에서 NAVER 두 키와 OPENAI_API_KEY(OAI_KEY 호환)만 읽으며 파일을 변경하거나 키를 출력하지 않는다. DB·Redis·NATS는 위 격리 서비스로 고정하고 mock을 끈다. 탐색의 규칙 메타데이터만 사용하며 Gemini·Diffbot 키는 이 프로파일에 전달하지 않는다. Decision의 기존 질문·임계값·20→50 후보/3단계/시간/호출 상한은 유지한다.
 
 ```bash

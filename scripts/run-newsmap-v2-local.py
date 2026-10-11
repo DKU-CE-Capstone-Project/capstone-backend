@@ -16,6 +16,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--credentials-file", type=Path, default=ROOT / ".env")
     parser.add_argument("--port", type=int, default=8026)
+    parser.add_argument("--tier", choices=("FREE", "PAID"), default="PAID", help="Local prototype tier (default: PAID, up to 10 selected articles)")
     parser.add_argument("--with-reports", action="store_true", help="Enable real Diffbot/Gemini reports and critic (run --worker separately)")
     parser.add_argument("--worker", action="store_true", help="Run the report worker with the same isolated report profile")
     args = parser.parse_args()
@@ -45,7 +46,7 @@ def main() -> None:
         "NATS_URL": "nats://127.0.0.1:4233",
         "SESSION_STORE_REQUIRED": "true", "V2_STATE_MEMORY": "false",
         "SESSION_COOKIE_SECURE": "false", "SESSION_COOKIE_SAMESITE": "lax",
-        "PROTOTYPE_TIER": "FREE", "PAID_DEMO_ENABLED": "false",
+        "PROTOTYPE_TIER": args.tier, "PAID_DEMO_ENABLED": "true" if args.tier == "PAID" else "false",
         "CORS_ORIGINS": "http://127.0.0.1:5196,http://localhost:5196,http://127.0.0.1:5173,http://localhost:5173",
         "USE_LLM_METADATA": "false", "USE_LLM_SUMMARIES": "false",
         "USE_RAG": "false", "USE_CRITIC": "true" if reports_enabled else "false",
@@ -63,7 +64,7 @@ def main() -> None:
         return
     import uvicorn
 
-    print("[local-v2] real NAVER + Decision; loopback MongoDB/Redis/NATS; FREE")
+    print(f"[local-v2] real NAVER + Decision; loopback MongoDB/Redis/NATS; {args.tier}")
     print("[local-v2] real Diffbot/Gemini reports + critic; start --worker separately" if reports_enabled else "[local-v2] metadata uses rules; report generation is outside this profile")
     uvicorn.run("app.main:app", host="127.0.0.1", port=args.port)
 
