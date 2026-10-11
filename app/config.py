@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     news_search_global_hourly_limit: int = Field(default=1200, ge=1)
     news_map_client_hourly_limit: int = Field(default=30, ge=1)
     news_map_global_hourly_limit: int = Field(default=300, ge=1)
+    # Independent connected-client ceilings for anonymous costly work.
+    # Session rotation must not reset these budgets.
+    jobs_client_hourly_limit: int = Field(default=20, ge=1)
+    reports_client_hourly_limit: int = Field(default=10, ge=1)
+    strategies_client_hourly_limit: int = Field(default=20, ge=1)
+    analyze_client_hourly_limit: int = Field(default=20, ge=1)
 
     # demo_mode: burst 부하 데모의 재현성 확보용.
     # 외부 API(GDELT 타임아웃/Gemini 쿼터) 변동을 제거하기 위해 mock 뉴스 + 고정 처리지연 사용.
@@ -88,6 +94,10 @@ class Settings(BaseSettings):
     # 심어 사용자별 마인드맵 상태를 분리한다(12주차 회의 결정).
     # 상태는 Redis에 TTL과 함께 저장되므로, 만료 = 세션 소멸 = 데이터 삭제다.
     session_ttl_seconds: int = 86400  # 24시간
+    # Anonymous browsers can discard cookies to request fresh identities.
+    # Bound issuance by connected client and globally before a SID is stored.
+    session_issue_client_hourly_limit: int = Field(default=30, ge=1)
+    session_issue_global_hourly_limit: int = Field(default=600, ge=1)
     # Shared session state must be available for identity-bearing routes.
     # Tests and explicitly isolated local development may opt into memory storage.
     session_store_required: bool = True

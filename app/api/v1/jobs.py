@@ -17,6 +17,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.job_store import PUBLIC_JOB_ERROR, get_job, set_job
 from app.messaging.nats_client import publish_job
 from app.usage_limits import check_quota
@@ -36,7 +37,11 @@ class JobCreateResponse(BaseModel):
 @router.post("", response_model=JobCreateResponse, status_code=202)
 async def create_job(body: JobCreateRequest, request: Request) -> JobCreateResponse:
     """분석 job을 큐에 넣고 즉시 job_id를 반환한다 (202 Accepted)."""
-    await check_quota(request.state.session_id, "jobs", per_session=10, global_limit=200)
+    await check_quota(
+        request.state.session_id, "jobs", per_session=10, global_limit=200,
+        client_host=request.client.host if request.client else None,
+        per_client=settings.jobs_client_hourly_limit,
+    )
     job_id = str(uuid.uuid4())
     owner_sid = request.state.session_id
     await set_job(job_id, {"status": "queued", "keyword": body.keyword, "owner_sid": owner_sid})

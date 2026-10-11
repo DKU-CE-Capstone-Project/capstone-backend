@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app import database, store
 from app.agents.strategy_generator import generate_strategy
+from app.config import settings
 from app.schemas import StrategyCreateRequest, StrategyCreateResponse, StrategyResponse
 from app.usage_limits import check_quota
 
@@ -24,7 +25,11 @@ async def create_strategy(body: StrategyCreateRequest, request: Request) -> Stra
             detail=f"report_id '{body.report_id}' not found. /api/v1/reports 먼저 호출하세요.",
         )
 
-    await check_quota(request.state.session_id, "strategies", per_session=10, global_limit=200)
+    await check_quota(
+        request.state.session_id, "strategies", per_session=10, global_limit=200,
+        client_host=request.client.host if request.client else None,
+        per_client=settings.strategies_client_hourly_limit,
+    )
 
     strategy_data = await generate_strategy(
         report_summary=report.get("summary", ""),
