@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -93,14 +93,28 @@ async def session_cookie_middleware(request: Request, call_next):
         if origin is not None and origin not in settings.cors_origin_list:
             return JSONResponse(status_code=403, content={"detail": "허용되지 않은 요청 출처입니다."})
     try:
-        sid, is_new = await resolve(request.cookies.get(SESSION_COOKIE) or "")
+        sid, is_new = await resolve(
+            request.cookies.get(SESSION_COOKIE) or "",
+            request.client.host if request.client else None,
+        )
     except SessionStoreUnavailable:
         return JSONResponse(status_code=503, content={"detail": "세션 저장소를 사용할 수 없습니다. 잠시 후 다시 시도해 주세요."})
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     request.state.session_id = sid
+    request.state.session_is_new = is_new
 
     response = await call_next(request)
 
-    if is_new or getattr(request.state, "session_rotated", False):
+    if getattr(request.state, "session_deleted", False):
+        response.delete_cookie(
+            key=SESSION_COOKIE,
+            path="/",
+            httponly=True,
+            samesite=settings.session_cookie_samesite,
+            secure=settings.session_cookie_secure,
+        )
+    elif is_new or getattr(request.state, "session_rotated", False):
         response.set_cookie(
             key=SESSION_COOKIE,
             value=request.state.session_id,

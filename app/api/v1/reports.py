@@ -51,7 +51,11 @@ async def create_report(body: ReportCreateRequest, request: Request) -> ReportCr
             created_at=store.report_cache[existing_id].get("created_at", ""),
         )
 
-    await check_quota(request.state.session_id, "reports", per_session=5, global_limit=100)
+    await check_quota(
+        request.state.session_id, "reports", per_session=5, global_limit=100,
+        client_host=request.client.host if request.client else None,
+        per_client=settings.reports_client_hourly_limit,
+    )
 
     # 연관 뉴스도 메모리에 없으면 Mongo 폴백 — API 재시작 후에도 근거가 유지되도록.
     # (한 번만 조회해 evidence_news 에서 재사용한다)

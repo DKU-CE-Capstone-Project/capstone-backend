@@ -32,7 +32,7 @@ from app.schemas import (
     SourceResponse,
     ThumbnailResponse,
 )
-from app.usage_limits import check_quota
+from app.usage_limits import check_quota, client_key
 from app.utils import cache_articles, tier_ok
 
 router = APIRouter()
@@ -41,7 +41,7 @@ router = APIRouter()
 async def _limit_search(request: Request) -> None:
     # Use the connected peer, never an untrusted X-Forwarded-For header. A
     # reverse proxy may make this a shared bucket; the global cap still holds.
-    peer = request.client.host if request.client else "unknown"
+    peer = client_key(request.client.host if request.client else None)
     await check_quota(
         peer, "news_search",
         per_session=settings.news_search_client_hourly_limit,
@@ -50,7 +50,7 @@ async def _limit_search(request: Request) -> None:
 
 
 async def _limit_news_map(request: Request) -> None:
-    peer = request.client.host if request.client else "unknown"
+    peer = client_key(request.client.host if request.client else None)
     await check_quota(
         peer, "news_map",
         per_session=settings.news_map_client_hourly_limit,

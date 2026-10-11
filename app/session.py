@@ -25,6 +25,7 @@ import uuid
 from typing import Any
 
 from app.config import settings
+from app.usage_limits import check_quota, client_key
 
 SESSION_COOKIE = "econmind_sid"
 _KEY_PREFIX = "session:"
@@ -92,18 +93,24 @@ async def _existing(sid: str) -> dict[str, Any] | None:
     return entry[1] if entry else None
 
 
-async def issue() -> str:
-    """Persist a server-created SID before sending it to a browser."""
+async def issue(client_host: str | None) -> str:
+    """Reserve issuance capacity before persisting a server-created SID."""
+    await check_quota(
+        client_key(client_host),
+        "session_issue",
+        per_session=settings.session_issue_client_hourly_limit,
+        global_limit=settings.session_issue_global_hourly_limit,
+    )
     sid = new_session_id()
     await save(sid, _empty(sid))
     return sid
 
 
-async def resolve(candidate: str) -> tuple[str, bool]:
+async def resolve(candidate: str, client_host: str | None) -> tuple[str, bool]:
     """Accept only a live SID previously issued by this server."""
     if _SID_PATTERN.fullmatch(candidate) and await _existing(candidate) is not None:
         return candidate, False
-    return await issue(), True
+    return await issue(client_host), True
 
 
 def _empty(sid: str) -> dict[str, Any]:

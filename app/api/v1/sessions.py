@@ -7,7 +7,7 @@ POST /api/v1/session/mindmap/expand · collapse — 마인드맵 확장 상태 �
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app import session as session_store
@@ -43,8 +43,18 @@ async def read_session(request: Request) -> SessionResponse:
 async def reset_session(request: Request) -> SessionResponse:
     """세션 데이터를 비웁니다. 마인드맵 상태가 함께 사라집니다."""
     sid = request.state.session_id
+    if request.state.session_is_new:
+        return _to_response(await session_store.load(sid))
+    try:
+        new_sid = await session_store.issue(request.client.host if request.client else None)
+    except HTTPException as exc:
+        if exc.status_code not in (429, 503):
+            raise
+        await session_store.clear(sid)
+        request.state.session_deleted = True
+        return _to_response({})
     await session_store.clear(sid)
-    request.state.session_id = await session_store.issue()
+    request.state.session_id = new_sid
     request.state.session_rotated = True
     data = await session_store.load(request.state.session_id)
     return _to_response(data)

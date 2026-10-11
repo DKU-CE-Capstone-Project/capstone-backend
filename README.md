@@ -238,11 +238,21 @@ NCP 요청은 `https://naverapihub.apigw.ntruss.com/search/v1/news`에 `X-NCP-AP
 기본 설정은 Redis 장애 시 세션·리포트·전략·작업 결과 API를 503으로 처리한다.
 단일 인스턴스 로컬 개발에서만 `SESSION_STORE_REQUIRED=false`로 메모리 저장을 허용한다.
 임의 쿠키 값이나 만료된 값은 새 세션으로 교체한다. 전체 세션 삭제는 쿠키를 교체한다.
+새 세션 발급은 연결 IP당 시간당 30회, 전체 시간당 600회로 제한한다. 기존 유효 쿠키의 사용은 발급 한도를 소모하지 않는다. 프록시를 사용할 때 연결 IP의 신뢰 경계를 올바르게 설정해야 이 한도가 유효하다.
+발급 한도가 소진되어도 `DELETE /api/v1/session`은 기존 상태를 삭제하고 쿠키를 만료시킨다. 이 경우 새 세션은 한도가 회복된 뒤 발급된다.
+작업·리포트·전략·분석 생성은 세션당/연결 IP당/전체 한도를 한 번에 검사한다. 기본 연결 IP 한도는 각각 시간당 20/10/20/20회이며, 세션 쿠키를 바꿔도 초기화되지 않는다. 공유 IP 환경에서는 여러 사용자가 이 한도를 함께 사용하므로 운영량에 맞춰 조정해야 한다.
+IPv6 연결은 임시 주소 교체를 고려해 /64 단위로 묶고 IPv4 매핑 주소는 IPv4와 같은 버킷을 사용한다.
 세션 ID는 JSON 응답에 포함하지 않는다. 리포트·전략·작업 결과는 생성 세션만 조회할 수 있으며,
 이 변경 전 저장된 소유자 정보 없는 결과는 API에서 조회할 수 없다.
 
 ```bash
 SESSION_TTL_SECONDS=86400      # 세션 수명(초). 상태 저장 시 갱신
+SESSION_ISSUE_CLIENT_HOURLY_LIMIT=30  # 연결 IP당 시간당 신규 발급
+SESSION_ISSUE_GLOBAL_HOURLY_LIMIT=600 # 전체 시간당 신규 발급
+JOBS_CLIENT_HOURLY_LIMIT=20       # 작업 제출의 연결 IP당 한도
+REPORTS_CLIENT_HOURLY_LIMIT=10    # 리포트 생성의 연결 IP당 한도
+STRATEGIES_CLIENT_HOURLY_LIMIT=20 # 전략 생성의 연결 IP당 한도
+ANALYZE_CLIENT_HOURLY_LIMIT=20    # 레거시 분석의 연결 IP당 한도
 SESSION_STORE_REQUIRED=true   # Redis 장애 시 503
 SESSION_COOKIE_SECURE=false    # HTTPS로 서비스할 때 true
 SESSION_COOKIE_SAMESITE=lax    # 프론트와 API가 다른 출처면 none(+secure=true)
