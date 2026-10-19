@@ -1,5 +1,7 @@
 """Regression tests for ownership, session rotation, and admission controls."""
 
+from copy import deepcopy
+
 from fastapi.testclient import TestClient
 
 from app import session as session_store
@@ -29,6 +31,25 @@ def test_unknown_sid_is_replaced_and_reset_rotates() -> None:
     old_client.cookies.set("econmind_sid", issued, domain="testserver.local", path="/")
     old_client.get("/api/v1/session")
     assert old_client.cookies.get("econmind_sid") != issued
+
+
+def test_oversized_mindmap_node_ids_do_not_change_existing_session() -> None:
+    client = TestClient(app)
+    path = "/api/v1/session/mindmap"
+    valid_id = "n" * 128
+    assert client.post(f"{path}/expand", json={"news_id": valid_id}).status_code == 200
+    assert client.post(f"{path}/collapse", json={"news_id": valid_id}).status_code == 200
+    assert client.post(f"{path}/expand", json={"news_id": valid_id}).status_code == 200
+
+    sid = client.cookies.get("econmind_sid")
+    before = deepcopy(session_store._memory_store[sid][1])
+    for action in ("expand", "collapse"):
+        for length in (129, 65536):
+            response = client.post(f"{path}/{action}", json={"news_id": "x" * length})
+            assert response.status_code == 422
+            assert client.cookies.get("econmind_sid") == sid
+            assert session_store._memory_store[sid][1] == before
+    assert client.get("/api/v1/session").json()["mindmap"]["expanded_news_ids"] == [valid_id]
 
 
 def test_session_store_outage_fails_closed_without_affecting_health(monkeypatch) -> None:
