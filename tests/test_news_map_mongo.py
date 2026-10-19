@@ -153,11 +153,12 @@ async def test_local_mongo_expansion_cards_and_map_vectors_survive_restart(local
     await cache_articles([cached(oil("center", *OIL_CENTER), 1), cached(repeat(1), 2)])
     before = await news_map.build_news_map(await store.get_news("center"), target=1)
     assert [item.article["news_id"] for item in before.items] == ["forecast"]
-    assert len(searches) == 1 and searches[0][0] != "국제유가" and searches[0][1] == 1
+    # Expansion continues the original query after its initial 20 results.
+    assert searches == [("국제유가", 21)]
     saved = await local_mongo[database.NEWS].find_one({"news_id": "forecast"})
     assert "embedding" not in saved  # No extra RAG generation during expansion.
     assert saved["news_map_embedding"]["metadata"]["purpose"] == "news_map"
-    assert saved["_search_keyword"] == searches[0][0] and saved["_search_rank"] == 1
+    assert saved["_search_keyword"] == "국제유가" and saved["_search_rank"] == 21
     count = len(calls)
     store.news_cache.clear()
     embeddings._cache.clear()
