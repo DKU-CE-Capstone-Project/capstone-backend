@@ -1,4 +1,5 @@
 """v2 contract/security tests with isolated state and deterministic candidates."""
+import asyncio
 from copy import deepcopy
 
 import pytest
@@ -175,8 +176,25 @@ def test_map_limit_and_own_resource_tombstone(fixture, monkeypatch):
     value = create(client)
     assert client.post('/api/v2/maps', json={'query': '추가'}).json()['error']['code'] == 'SESSION_MAP_LIMIT_REACHED'
     url = f"/api/v2/maps/{value['map_id']}"
+    sid = client.cookies.get('econmind_sid')
     assert client.delete(url).status_code == 204
-    assert client.get(url).status_code == 410
+    deleted = client.get(url)
+    assert deleted.status_code == 410 and deleted.json()['error']['code'] == 'RESOURCE_EXPIRED'
+    with TestClient(app) as other:
+        other.get('/api/v2/session')
+        assert other.get(url).status_code == 404
+    assert asyncio.run(state.keys(sid, 'map')) == []
+
+    renewed = []
+    original_expire = state._expire
+
+    async def record_expire(storage_key, ttl):
+        renewed.append(storage_key)
+        await original_expire(storage_key, ttl)
+
+    monkeypatch.setattr(state, '_expire', record_expire)
+    assert client.get('/api/v2/session').status_code == 200
+    assert state.key(sid, 'map', value['map_id']) not in renewed
     assert client.post('/api/v2/maps', json={'query': '대체'}).status_code == 201
 
 
