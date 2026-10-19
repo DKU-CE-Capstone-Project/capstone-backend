@@ -349,7 +349,7 @@ async def reset_map(sid: str, map_id: str, expected: int) -> dict:
 
 async def delete_map(sid: str, map_id: str) -> None:
     value = await load_map(sid, map_id)
-    await state.delete(state.key(sid, 'map', map_id))
+    await state.tombstone_map(sid, map_id)
     await cancel_detached(sid, value.get('active_report_job_id'))
 
 

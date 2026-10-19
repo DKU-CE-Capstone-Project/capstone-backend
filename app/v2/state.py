@@ -48,6 +48,20 @@ if ARGV[3] == '1' then redis.call('EXPIRE', KEYS[1], ARGV[4]) end
 redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
 return 1
 """
+_DELETE_MAP = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return -2 end
+local raw = redis.call('GET', KEYS[2])
+local ttl = redis.call('PTTL', KEYS[2])
+if not raw or ttl <= 0 then return -2 end
+if redis.call('EXISTS', KEYS[3]) == 0 then return -1 end
+local session = cjson.decode(raw)
+local maps = session.resource_index and session.resource_index.map
+if not maps or maps[ARGV[1]] == nil or maps[ARGV[1]] == cjson.null then return -1 end
+maps[ARGV[1]] = cjson.null
+redis.call('SET', KEYS[2], cjson.encode(session), 'PX', ttl)
+redis.call('DEL', KEYS[3])
+return 0
+"""
 
 
 def iso(epoch: float | None = None) -> str:
@@ -247,7 +261,9 @@ async def session(sid: str, touch: bool = False) -> dict:
             for kind, resources in data['resource_index'].items():
                 if kind not in ('map', 'result-access'):
                     continue
-                for resource_id in resources:
+                for resource_id, expires_at in resources.items():
+                    if expires_at is None:  # Explicitly deleted map: retain 410 without renewing a missing key.
+                        continue
                     await _expire(key(sid, kind, resource_id), settings.session_ttl_seconds)
                     resources[resource_id] = data['expires_at']
         await _save_live_session(sid, data, touch)
@@ -276,7 +292,8 @@ async def _save_live_session(sid: str, data: dict, touch: bool = False) -> None:
 
 
 async def keys(sid: str, kind: str) -> list[str]:
-    return list((await session(sid)).get('resource_index', {}).get(kind, {}))
+    resources = (await session(sid)).get('resource_index', {}).get(kind, {})
+    return [rid for rid, expires_at in resources.items() if expires_at is not None]
 
 
 async def register_resource(sid: str, kind: str, resource_id: str, expires_at: str) -> None:
@@ -287,6 +304,36 @@ async def register_resource(sid: str, kind: str, resource_id: str, expires_at: s
             raise V2Error(410, "SESSION_EXPIRED", "세션이 만료되었습니다.")
         data['resource_index'].setdefault(kind, {})[resource_id] = expires_at
         await _save_live_session(sid, data)
+
+
+async def tombstone_map(sid: str, map_id: str) -> None:
+    """Delete a map while retaining its 410 marker without a live-resource renewal."""
+    map_key = key(sid, 'map', map_id)
+    async with mutex(f"v2:index-lock:{sid}"):
+        if memory_enabled():
+            # Match memory CAS users so a concurrent revision write cannot
+            # recreate the map after deletion.
+            async with mutex(f"cas:{map_key}"):
+                if await base_session._existing(sid) is None:
+                    raise V2Error(410, "SESSION_EXPIRED", "세션이 만료되었습니다.")
+                data = await get(f"v2:session:{sid}")
+                if data is None:
+                    raise V2Error(410, "SESSION_EXPIRED", "세션이 만료되었습니다.")
+                if not await get(map_key) or data['resource_index'].get('map', {}).get(map_id) is None:
+                    raise V2Error(410, "RESOURCE_EXPIRED", "탐색이 만료되었습니다.")
+                await delete(map_key)
+                data['resource_index']['map'][map_id] = None
+                await _save_live_session(sid, data)
+            return
+        try:
+            status = await _client().eval(_DELETE_MAP, 3, f"session:{sid}",
+                                          f"v2:session:{sid}", map_key, map_id)
+        except Exception as exc:
+            raise unavailable() from exc
+        if status == -2:
+            raise V2Error(410, "SESSION_EXPIRED", "세션이 만료되었습니다.")
+        if status == -1:
+            raise V2Error(410, "RESOURCE_EXPIRED", "탐색이 만료되었습니다.")
 
 
 async def resource(sid: str, kind: str, resource_id: str) -> dict:
@@ -313,7 +360,9 @@ async def authorize_result(sid: str, result_id: str, kind: str) -> None:
         return
     field = 'strategy_id' if kind in ('strategy', 'strategies') else 'report_id'
     for resource_kind in ('map', 'report-job'):
-        for rid in data['resource_index'].get(resource_kind, {}):
+        for rid, expires_at in data['resource_index'].get(resource_kind, {}).items():
+            if expires_at is None:
+                continue
             owned = await get(key(sid, resource_kind, rid))
             result = (owned or {}).get('last_result' if resource_kind == 'map' else 'result') or {}
             if result.get(field) == result_id:
@@ -325,6 +374,8 @@ async def authorize_result(sid: str, result_id: str, kind: str) -> None:
 async def clear_session(sid: str) -> None:
     data = await get(f"v2:session:{sid}") or {}
     for kind, resources in data.get('resource_index', {}).items():
-        for rid in resources:
+        for rid, expires_at in resources.items():
+            if expires_at is None:
+                continue
             await delete(key(sid, kind, rid))
     await delete(f"v2:session:{sid}")

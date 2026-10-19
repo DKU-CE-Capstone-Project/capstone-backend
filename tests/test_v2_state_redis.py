@@ -102,6 +102,32 @@ async def test_real_tombstones_and_result_access_are_session_owned(real_redis):
 
 
 @pytest.mark.asyncio
+async def test_real_map_delete_keeps_410_without_a_live_index_entry(real_redis):
+    sid = real_redis
+    map_id = 'deleted-fixture'
+    map_key = state.key(sid, 'map', map_id)
+    parent = await state.session(sid)
+    await state.put(map_key, {'revision': 1}, 120)
+    await state.register_resource(sid, 'map', map_id, parent['expires_at'])
+
+    await state.tombstone_map(sid, map_id)
+
+    assert await state._client().get(map_key) is None
+    assert await state.keys(sid, 'map') == []
+    assert (await state.session(sid, touch=True))['resource_index']['map'][map_id] is None
+    with pytest.raises(V2Error) as deleted:
+        await state.resource(sid, 'map', map_id)
+    assert deleted.value.status == 410
+    with pytest.raises(V2Error) as stale_write:
+        await state.cas(map_key, 1, {'revision': 2}, 120)
+    assert stale_write.value.status == 410
+    assert await state._client().get(map_key) is None
+    with pytest.raises(V2Error) as unknown:
+        await state.resource(sid, 'map', 'unknown-fixture')
+    assert unknown.value.status == 404
+
+
+@pytest.mark.asyncio
 async def test_polling_does_not_extend_parent_but_user_activity_does(real_redis):
     sid = real_redis
     before = await state.session(sid)
