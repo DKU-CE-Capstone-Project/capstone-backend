@@ -11,13 +11,13 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app import session as session_store
-from app.schemas import MindmapState, SessionResponse
+from app.schemas import MindmapState, ResourceId, SessionResponse
 
 router = APIRouter()
 
 
 class NodeRequest(BaseModel):
-    news_id: str
+    news_id: ResourceId
 
 
 def _to_response(data: dict) -> SessionResponse:
