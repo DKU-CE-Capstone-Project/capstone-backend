@@ -110,18 +110,6 @@ async def readiness():
                                  "mongodb": "on" if connected else "unavailable",
                                  "redis": "on" if redis_ready else "unavailable"})
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
-    # 세션 쿠키를 주고받아야 하므로 credentials를 허용한다.
-    # allow_origins=["*"]이어도 Starlette가 쿠키 요청에는 요청 Origin을 그대로 echo하므로
-    # 브라우저의 "credentials + wildcard 금지" 규칙에 걸리지 않는다.
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
 # ── 세션 쿠키 발급 ─────────────────────────────────────────────────────────────
 # 로그인을 넣지 않기로 했으므로(12주차 회의) 계정 대신 쿠키로 사용자를 구분한다.
 # 모든 요청에 세션 id를 붙여 두면 각 엔드포인트는 request.state.session_id만 보면 된다.
@@ -163,7 +151,7 @@ async def session_cookie_middleware(request: Request, call_next):
     except HTTPException as exc:
         if is_v2:
             return await http_error_handler(request, exc)
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
     request.state.session_id = sid
     request.state.session_is_new = is_new
 
@@ -193,6 +181,18 @@ async def session_cookie_middleware(request: Request, call_next):
             path="/",
         )
     return response
+
+
+# Keep CORS outside the session middleware so early 429/503 responses expose
+# their headers to allowed browser origins as well as ordinary route responses.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origin_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Retry-After"],
+)
 
 
 # ── /api/v1 라우터 ─────────────────────────────────────────────────────────────

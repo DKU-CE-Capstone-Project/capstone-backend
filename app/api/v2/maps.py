@@ -4,19 +4,25 @@ from fastapi import APIRouter, Request, Response
 from app import session as base_session
 from app.api.v2 import schemas
 from app.config import settings
-from app.usage_limits import check_quota, client_key
+from app.usage_limits import QuotaRequest, check_quota, check_quotas, client_key
 from app.v2 import maps, state
 
 router = APIRouter()
 
 
-async def _limit(request: Request, action: str):
+def _quota(request: Request, action: str) -> QuotaRequest:
     peer = client_key(request.client.host if request.client else None)
-    await check_quota(peer, action,
-                      per_session=(settings.news_map_client_hourly_limit if action == 'news_map'
-                                   else settings.news_search_client_hourly_limit),
-                      global_limit=(settings.news_map_global_hourly_limit if action == 'news_map'
-                                    else settings.news_search_global_hourly_limit))
+    return QuotaRequest(peer, action,
+                        per_session=(settings.news_map_client_hourly_limit if action == 'news_map'
+                                     else settings.news_search_client_hourly_limit),
+                        global_limit=(settings.news_map_global_hourly_limit if action == 'news_map'
+                                      else settings.news_search_global_hourly_limit))
+
+
+async def _limit(request: Request, action: str):
+    quota = _quota(request, action)
+    await check_quota(quota.owner_sid, quota.action,
+                      per_session=quota.per_session, global_limit=quota.global_limit)
 
 
 @router.get('/session', response_model=schemas.Session)
@@ -39,8 +45,7 @@ async def delete_session(request: Request):
 
 @router.post('/maps', status_code=201, response_model=schemas.Map)
 async def create_map(request: Request, body: maps.MapCreate):
-    await _limit(request, 'news_search')
-    await _limit(request, 'news_map')
+    await check_quotas(_quota(request, 'news_search'), _quota(request, 'news_map'))
     return maps.public_map(await maps.create_map(request.state.session_id, body.query))
 
 
@@ -84,5 +89,4 @@ async def delete_map(request: Request, map_id: str):
 
 @router.get('/news/{news_id}', response_model=schemas.NewsCard)
 async def get_news(request: Request, news_id: str):
-    await _limit(request, 'news_search')
     return await maps.news_card(request.state.session_id, news_id)
