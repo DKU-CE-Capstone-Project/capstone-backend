@@ -59,6 +59,12 @@ async def local_services(monkeypatch):
     monkeypatch.setattr(reports, "check_quota", isolated_quota)
     from app.api.v2 import maps as map_api
     monkeypatch.setattr(map_api, "check_quota", isolated_quota)
+    async def isolated_quotas(*requests):
+        return await usage_limits.check_quotas(*(usage_limits.QuotaRequest(
+            request.owner_sid, f"{request.action}_{fixture_id}", request.per_session,
+            request.global_limit, request.client_host, request.per_client,
+        ) for request in requests))
+    monkeypatch.setattr(map_api, "check_quotas", isolated_quotas)
     monkeypatch.setattr(report_worker, "STREAM", "reports_v2_test_" + fixture_id)
     monkeypatch.setattr(report_worker, "SUBJECT", "reports.generate.v2.fixture." + fixture_id)
     monkeypatch.setattr(report_worker, "DURABLE", "report-fixture-" + fixture_id)
