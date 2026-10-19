@@ -11,6 +11,8 @@ graceful no-op/빈값을 반환 → 기존 in-memory 흐름을 절대 깨지 않
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -35,7 +37,9 @@ EMBED_DIM = 768  # gemini-embedding-001, 768차원 요청
 
 _client = None
 _db = None
-_disabled = False  # 연결 실패 1회 후 재시도 폭주 방지
+_retry_at = 0.0  # Constructor failures are retried after a short cooldown.
+_indexes_checked_for = None
+_logger = logging.getLogger("econmind.mongo")
 
 
 class DatabasePersistenceError(RuntimeError):
@@ -48,9 +52,17 @@ async def ping() -> bool:
         return False
     try:
         await asyncio.wait_for(db.command("ping"), timeout=3)
-        return True
     except Exception:  # noqa: BLE001 — readiness must report dependency failure
         return False
+    # A failed startup probe skips index setup. Complete it once after MongoDB
+    # recovers before reporting the dependency ready to the deployment.
+    if _indexes_checked_for is not db:
+        try:
+            await ensure_indexes()
+        except Exception as exc:  # noqa: BLE001 — readiness must remain a probe
+            _logger.warning("MongoDB index setup failed: %s", type(exc).__name__)
+            return False
+    return _indexes_checked_for is db
 
 
 def _require_available(db) -> None:
@@ -193,26 +205,35 @@ def article_from_news_doc(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def _get_db():
-    """motor DB 핸들 lazy 초기화. 비활성/실패 시 None."""
-    global _client, _db, _disabled
-    if _disabled or not settings.use_mongodb or not settings.mongodb_uri:
+    """motor DB 핸들 lazy 초기화. 일시적 생성 실패 후 제한적으로 재시도."""
+    global _client, _db, _retry_at
+    if not settings.use_mongodb or not settings.mongodb_uri:
         return None
     if _db is not None:
         return _db
+    if time.monotonic() < _retry_at:
+        return None
+    client = None
     try:
         from motor.motor_asyncio import AsyncIOMotorClient
 
-        _client = AsyncIOMotorClient(
+        client = AsyncIOMotorClient(
             settings.mongodb_uri,
             serverSelectionTimeoutMS=8000,
             connectTimeoutMS=8000,
         )
-        _db = _client[settings.mongodb_db_name]
-        return _db
+        db = client[settings.mongodb_db_name]
     except Exception as exc:  # noqa: BLE001
-        print(f"[mongo] init failed → disabled: {type(exc).__name__}: {exc}")
-        _disabled = True
+        if client is not None:
+            try:
+                client.close()
+            except Exception as close_exc:  # noqa: BLE001 — keep the retry path available
+                _logger.debug("MongoDB client cleanup failed: %s", type(close_exc).__name__)
+        _logger.warning("MongoDB client initialization failed: %s", type(exc).__name__)
+        _retry_at = time.monotonic() + 5
         return None
+    _client, _db, _retry_at = client, db, 0.0
+    return db
 
 
 def enabled() -> bool:
@@ -222,16 +243,17 @@ def enabled() -> bool:
 # ── 인덱스 보장 (startup) ───────────────────────────────────────────────────
 
 async def ensure_indexes() -> None:
+    global _indexes_checked_for
     db = _get_db()
     if db is None:
         return
-    # 1) 연결(ping) 실패만 치명적 → Mongo 비활성. 인덱스 실패는 비치명(레거시 데이터 충돌 등).
+    if _indexes_checked_for is db:
+        return
+    # 1) 연결 실패는 이번 시도만 중단한다. 다음 readiness probe가 재시도한다.
     try:
-        await _client.admin.command("ping")
+        await db.command("ping")
     except Exception as exc:  # noqa: BLE001
-        global _disabled
-        print(f"[mongo] ping failed → disabled: {type(exc).__name__}: {exc}")
-        _disabled = True
+        _logger.warning("MongoDB startup ping failed: %s", type(exc).__name__)
         return
 
     print("[mongo] connected")
@@ -252,6 +274,7 @@ async def ensure_indexes() -> None:
             print(f"[mongo] index {opts['name']} skip: {type(exc).__name__}: {str(exc)[:80]}")
     # 3) 벡터검색 인덱스 (RAG 핵심)
     await ensure_vector_index()
+    _indexes_checked_for = db
 
 
 async def ensure_vector_index() -> None:
