@@ -155,6 +155,15 @@ class Settings(BaseSettings):
     news_map_supplement_page_size: int = Field(default=20, ge=1, le=50)
     news_map_supplement_timeout_seconds: float = Field(default=20, gt=0, le=60)
     news_map_supplement_cache_ttl_seconds: float = Field(default=60, gt=0, le=600)
+    # ── 초기 키워드 맵 (Zero-LLM: gemini-embedding-001 배치 + Kiwi) ────────
+    keyword_map_embedding_model: str = "gemini-embedding-001"
+    keyword_map_embedding_dimensions: int = Field(default=768, ge=128, le=3072)
+    keyword_map_embedding_task_type: Literal["SEMANTIC_SIMILARITY", "CLUSTERING"] = "SEMANTIC_SIMILARITY"
+    keyword_map_sim_threshold: float = Field(default=0.42, ge=0.20, le=0.85)
+    keyword_map_sim_threshold_max: float = Field(default=0.51, ge=0.30, le=0.90)
+    keyword_map_anisotropy_gain: float = Field(default=0.25, ge=0.0, le=1.0)
+    keyword_map_candidate_size: int = Field(default=50, ge=5, le=50)
+    keyword_map_cache_ttl_seconds: int = Field(default=180, ge=0, le=3600)
     use_rag: bool = True       # 리포트 생성 시 벡터검색으로 유사 과거 뉴스 근거 주입
     use_critic: bool = True    # 생성된 리포트를 검증(critic) 에이전트로 점검
 

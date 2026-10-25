@@ -154,6 +154,22 @@ class RecommendedKeywordsResponse(BaseModel):
     keywords: list[RecommendedKeyword]
 
 
+class KeywordMapNodeItem(BaseModel):
+    keyword: str
+    kind: Literal["center", "issue", "entity"]
+    search_query: str
+    article_count: int = Field(ge=0)
+    center_news_id: str | None = None
+    news_ids: list[str] = Field(default_factory=list)
+
+
+class KeywordMapResponse(BaseModel):
+    query: str
+    total_articles: int = Field(ge=0)
+    keywords: list[str] = Field(default_factory=list)
+    nodes: list[KeywordMapNodeItem] = Field(default_factory=list)
+
+
 # ── /api/v1/reports ───────────────────────────────────────────────────────────
 
 class ReportCreateRequest(BaseModel):

@@ -12,9 +12,11 @@ from app.agents import (
     article_metadata,
     decision_client,
     diffbot_client,
+    keyword_map_extractor,
     naver_categories,
     related_candidates,
 )
+from app.api.v1 import keywords as keywords_api
 from app.config import settings
 
 
@@ -56,6 +58,8 @@ def offline_settings(monkeypatch):
     diffbot_client._extraction_cache.clear()
     naver_categories._cache.clear()
     naver_categories._images.clear()
+    keyword_map_extractor.clear_embedding_cache()
+    keywords_api.clear_keyword_map_cache()
     monkeypatch.delenv("DIFFBOT_TOKEN", raising=False)
     monkeypatch.delenv("DIFFBOT_API_KEY", raising=False)
     for cache in (
@@ -75,6 +79,8 @@ def offline_settings(monkeypatch):
     article_metadata._cache.clear()
     article_embeddings._cache.clear()
     related_candidates._cache.clear()
+    keyword_map_extractor.clear_embedding_cache()
+    keywords_api.clear_keyword_map_cache()
     store.news_cache.clear()
 
 

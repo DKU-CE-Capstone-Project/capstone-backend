@@ -25,11 +25,11 @@ def main() -> None:
         "NAVER_CLIENT_ID": credentials.get("NAVER_CLIENT_ID"),
         "NAVER_CLIENT_SECRET": credentials.get("NAVER_CLIENT_SECRET"),
         "OPENAI_API_KEY": credentials.get("OPENAI_API_KEY") or credentials.get("OAI_KEY"),
+        "GOOGLE_API_KEY": credentials.get("GOOGLE_API_KEY"),
     }
     reports_enabled = args.with_reports or args.worker
     if reports_enabled:
         required.update({
-            "GOOGLE_API_KEY": credentials.get("GOOGLE_API_KEY"),
             "DIFFBOT_TOKEN": credentials.get("DIFFBOT_API_KEY") or credentials.get("DIFFBOT_TOKEN"),
         })
     missing = [name for name, value in required.items() if not value or not value.strip()]

@@ -1,7 +1,18 @@
 # EconMind Backend
 
-실시간 경제 뉴스 검색·뉴스맵·AI 리포트 API. FastAPI / Python 3.11 이상.
-프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 구현 범위는 아래 2026-10-11 v2 구현과 현재 작업 트리이며, 2026-10-01~10 설명·검증 수치는 각 날짜의 기록이다. 정본 `docs/14-newsmap-v2-implementation.md`와 `docs/99-verification.md`에 현재 네 저장소의 상태와 검증 범위를 함께 기록했다. 현재 운영 상태는 아래 배포 확인을 따른다.
+실시간 경제 뉴스 검색·키워드맵·뉴스맵·AI 리포트 API. FastAPI / Python 3.11 이상.
+프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 구현 범위는 아래 2026-10-25 초기 키워드 맵 전환과 2026-10-11~19 v2 구현이며, 과거 설명·검증 수치는 각 날짜의 기록이다. 정본 `docs/14-newsmap-v2-implementation.md`와 `docs/99-verification.md`에 네 저장소의 상태와 검증 범위를 함께 기록했다.
+
+## 초기 키워드 맵 실데이터 전환 (2026-10-25)
+
+기존 고정 mock 키워드 대신, 검색어 관련 실시간 뉴스 제목·요약에서 근거 있는 이슈·개체 노드를 추출하는 **`GET /api/v1/keywords/map?q=...`** 엔드포인트를 구현했다(`feat/keyword-map-gemini` → `main`). 생성형 LLM이나 기사 본문 추출(Diffbot)을 호출하지 않는 **Zero-LLM** 파이프라인이다.
+
+- **입력 수집·캐시·한도:** NAVER 모드에서는 `news_fetcher.fetch_search_page(q, start=1, size=50)`(기본 `KEYWORD_MAP_CANDIDATE_SIZE=50`), mock 모드에서는 `fetch_news(q)`를 사용한다. 프로세스 내 LRU 캐시(최대 128건, 기본 `KEYWORD_MAP_CACHE_TTL_SECONDS=180`) 적중이나 공백 입력 검증 오류(`422`)는 공급자 한도를 차감하지 않으며, 미캐시 공급자 조회 시에만 `news_search` 시간당 한도(`NEWS_SEARCH_CLIENT_HOURLY_LIMIT`/`NEWS_SEARCH_GLOBAL_HOURLY_LIMIT`)를 적용한다.
+- **배치 임베딩 (`app/agents/llm.py`, `app/agents/keyword_map_extractor.py`):** `gemini-embedding-001`(768차원, `SEMANTIC_SIMILARITY`)에 `embed_content(contents=[...])` 배치 호출을 사용한다. 미캐시 검색 1회당 **(1) 검색어 + 고유 기사 제목·첫 문장 배치 1회**, **(2) 클러스터별 상위 구문 후보 배치 1회**로 총 **2회 HTTP 호출**(평균 약 1,500 입력 토큰)만 수행하며, 텍스트 SHA-256 기반 프로세스 내 벡터 캐시(최대 2,048개)를 재사용한다. 임베딩 키 누락·실패 시 `503`을 반환한다.
+- **이방성 보정 클러스터링·구문/개체 추출:** 검색어 방향 성분을 투영 제거한 코사인 유사도(`0.65`)와 제목 문자 바이그램 Dice(`0.35`)를 결합해 계층 군집화한다. `gemini-embedding-001`의 높은 배경 코사인에 의한 과병합을 막기 위해 코퍼스 상삼각 평균 유사도(`bg_sem_mean`)에 따라 임계값을 `min(KEYWORD_MAP_SIM_THRESHOLD_MAX=0.51, KEYWORD_MAP_SIM_THRESHOLD=0.42 + 0.25 * max(0, bg_sem_mean - 0.30))`로 자동 보정한다. 상승/하락 방향이 반대인 기사는 제목 어휘 겹침이 낮으면 분리한다.
+- **내부 궤도(`issue`, 최대 4개) · 외부 궤도(`entity`, 최대 4개):** Kiwi(`kiwipiepy`) 지연 싱글턴(`asyncio.to_thread` 오프로딩)으로 절 단위 명사구 후보를 뽑고, `규모`·`수준`·`대비` 등 수식 의존 명사 단독 시작(`NON_INITIAL_MODIFIER_NOUNS`) 및 구문 중간 1음절 시작을 차단하되 `720억 규모 ...`·`대규모 ...` 같은 정량·복합 표현은 보존한다. 클러스터 내 기사 지지율·c-TF-IDF·센트로이드 코사인으로 대표 이슈 라벨을 고르고, 외부 궤도는 경제/산업 별칭 사전(`ENTITY_ALIASES`, `삼전닉스` 등 복합 별칭 분리 포함)과 Kiwi 고유명사(`NNP`/`SL`)에서 기사 집합 MMR로 최대 4개 개체를 선정한다.
+- **응답 스키마 (`KeywordMapResponse`):** `{query, total_articles, keywords, nodes}`를 반환하며 각 노드는 `keyword`, `kind`(`center` | `issue` | `entity`), `search_query`, `article_count`, `center_news_id`, `news_ids`를 포함한다. 로컬 `scripts/run-newsmap-v2-local.py` 실행 프로파일에도 키워드맵 임베딩을 위해 `.env`의 `GOOGLE_API_KEY` 전달을 추가했다(`USE_LLM_METADATA=false`, `USE_LLM_SUMMARIES=false`, `USE_RAG=false`, `NEWS_MAP_SELECTOR=decision`은 그대로 유지).
+- **로컬 검증:** `.venv/bin/python -m ruff check` 통과, 오프라인 `.venv/bin/python -m pytest -q` **456 passed, 18 skipped**.
 
 ## GCP 배포 확인 (2026-10-11)
 

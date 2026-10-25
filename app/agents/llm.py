@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
+from weakref import WeakKeyDictionary
 
 from app.config import settings
+
+_loop_clients: WeakKeyDictionary[asyncio.AbstractEventLoop, tuple[str, Any]] = WeakKeyDictionary()
 
 
 def _model_name() -> str:
@@ -14,7 +18,16 @@ def _client():
         return None
     from google import genai
 
-    return genai.Client(api_key=settings.google_api_key)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return genai.Client(api_key=settings.google_api_key)
+    cached = _loop_clients.get(loop)
+    if cached is not None and cached[0] == settings.google_api_key:
+        return cached[1]
+    client = genai.Client(api_key=settings.google_api_key)
+    _loop_clients[loop] = (settings.google_api_key, client)
+    return client
 
 
 async def generate(prompt: str) -> str:
@@ -146,4 +159,61 @@ async def _embed(
         return []
     except Exception as e:  # noqa: BLE001
         print(f"[llm] embed error (skip): {type(e).__name__}")
+        return []
+
+
+async def embed_batch(
+    texts: list[str],
+    *,
+    model: str | None = None,
+    dimensions: int = 768,
+    task_type: str | None = None,
+    batch_size: int = 100,
+) -> list[list[float]]:
+    """배치 Gemini 임베딩 반환 (`embed_content(contents=[...])`로 RPM 절약).
+
+    실패·키 누락·개수 불일치 시 빈 리스트를 반환한다.
+    """
+    if not texts:
+        return []
+    if not settings.google_api_key:
+        return []
+    cleaned = [(t or "").strip()[:8000] for t in texts]
+    if any(not c for c in cleaned):
+        return []
+    try:
+        client = _client()
+        if client is None:
+            return []
+        from google.genai import types as gtypes
+
+        out: list[list[float]] = []
+        step = max(1, min(batch_size, 100))
+        for start in range(0, len(cleaned), step):
+            chunk = cleaned[start : start + step]
+            resp = await asyncio.wait_for(
+                client.aio.models.embed_content(
+                    model=model or settings.embedding_model,
+                    contents=chunk,
+                    config=gtypes.EmbedContentConfig(
+                        output_dimensionality=dimensions,
+                        task_type=task_type,
+                    ),
+                ),
+                settings.embedding_timeout_seconds,
+            )
+            embs = getattr(resp, "embeddings", None)
+            if not embs or len(embs) != len(chunk):
+                return []
+            for item in embs:
+                vals = list(getattr(item, "values", None) or [])
+                if len(vals) != dimensions:
+                    return []
+                out.append(vals)
+        return out
+    except TimeoutError:
+        print("[llm] embed_batch timeout")
+        return []
+    except Exception as e:  # noqa: BLE001
+        print(f"[llm] embed_batch error (skip): {type(e).__name__}")
         return []
