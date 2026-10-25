@@ -24,6 +24,9 @@ dependencies = [
     "lxml>=5.0",
     # trafilatura fallback 추출기
     "trafilatura>=1.12",
+    # ── 초기 키워드 맵 형태소·벡터 연산 (Zero-LLM) ──────────────────────────
+    "numpy>=1.26",
+    "kiwipiepy>=0.20",
     # ── CNCF 이벤트 인프라 (api/worker 비동기 분리) ──────────────────────────
     # NATS JetStream 클라이언트 (이벤트 버스 / 큐)
     "nats-py>=2.6",
