@@ -20,6 +20,20 @@
 
 ## 뉴스맵·리포트 API v2 로컬 구현 (2026-10-11)
 
+### v2 큐·복구 한도 (2026-10-26)
+
+`reports.generate.v2`의 모든 워커는 하나의 `reports-v2-workers` durable을 공유한다. `V2_WORKER_MAX_CONCURRENCY=1`은 이 durable의 `max_ack_pending`을 제한하므로 기본값에서 전체 워커 집합의 미확인 작업은 1개다. 각 프로세스는 한 번에 1개만 처리한다. 복제 수를 늘려도 기본 전체 용량은 늘지 않으며, 상한을 올릴 때는 모든 워커에 같은 설정을 적용한다. 워커 시작 때 기존 durable의 변경 가능한 한도를 갱신하고 서버가 수용한 값을 확인한다. 다른 subject·push 소비자·ACK 정책과 충돌하면 시작을 거부한다. durable을 삭제하거나 소비 위치를 초기화하지 않는다.
+
+`V2_WORKER_MAX_ATTEMPTS=2`는 같은 Redis 작업의 최초 실행과 lease 만료 후 복구 실행을 합친 파이프라인 시작 한도다(설정 1~3). 중복 전달의 살아 있는 lease는 횟수를 차감하지 않고 기다리며, 한도를 소진하면 추가 파이프라인을 실행하지 않고 기존 `WORKER_LOST` 실패와 맵의 활성 작업 해제를 저장한다. 재시작해도 횟수는 보존되며, 기존 작업의 `worker_retries`도 변환해 계산한다. 이 수치는 하위 SDK의 HTTP 재시도 횟수나 금액 한도가 아니다. 사용자가 새 작업을 생성하는 비용은 별도 일일 예산 통제 대상이다.
+
+NATS의 전송 재시도는 `max_deliver=-1`로 두고 기존 stream 만료(`V2_JOB_TTL_SECONDS`, 기본 24시간)로 수명을 제한한다. 저장소 장애·ACK 손실이 3회 겹쳤다는 이유만으로 미완료 작업의 유일한 큐 메시지가 버려지지 않도록 하기 위함이다. 저장소 장애 때 파이프라인을 새로 시작하지 않으며 20초 뒤 전송을 재시도한다. 중복 lease 대기는 `in_progress`로 ACK 시간을 연장한다. 기존 작업 처리 deadline(`V2_JOB_TIMEOUT_SECONDS`, 기본 30분)과 Redis의 파이프라인 시작 한도는 그대로 적용한다. 이 변경과 두 새 설정 키는 **김건의 워커 배포가 필요**하며, GCP 실행·실제 공급자 호출 검증은 별도다.
+
+기존 stream의 보관 정책이 work queue가 아니거나 `max_age`가 0·설정 TTL보다 길면 워커 시작을 거부한다. 기존 stream을 자동 삭제·축소하지 않으며, 배포 담당이 보관 설정을 점검한 뒤 기동해야 한다.
+
+큐의 미확인 작업 상한은 공급자 측 HTTP 취소를 보장하지 않는다. lease를 잃은 워커가 이미 보낸 HTTP 요청은 나중에 끝날 수 있으며, 새 소유자는 기존 token의 결과 저장·연결을 거부한다. 하위 HTTP 시도 및 일일 비용 통제는 별도 정책이다.
+
+단위 회귀는 `python -m pytest -q tests/test_v2_worker_limits.py tests/test_v2_reports.py`로 실행한다. NATS만 사용하는 선택 검사는 임시 디렉터리로 `nats-server -js -a 127.0.0.1 -p 44233 -sd /tmp/econmind-worker-nats-test`를 별도로 기동한 뒤 `ECONMIND_V2_WORKER_NATS_TEST=1 python -m pytest -q tests/test_v2_worker_nats.py`로 실행한다. 임의의 fixture stream만 만들고 지우며, 외부 공급자·운영 큐·DB를 사용하지 않는다.
+
 2026-10-11 확인한 `origin/main/a0d75e3`에서 시작한 `codex/newsmap-v2-20261011` 구현이다. 문서 동기화 때 확인한 기준 커밋은 `9451057`이고, 아래 검색 범위 제한은 그 이후 작업 트리 변경까지 포함한다. 기준 설계는 정본의 [요구사항](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/09-newsmap-prototype-data-requirements.md), [API v2](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/10-newsmap-prototype-api-design.md), [DB](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/11-newsmap-prototype-db-design.md)(초안 2026-10-04)다. 아래 v1 설명과 검증 수치는 각 날짜의 기록이며, 이 절은 배포 전 로컬 검증 기록이다.
 
 - `/api/v2/session`과 `/maps`는 서버 쿠키 세션에 속한다. JSON에는 공개 `session_epoch`만 제공한다. 맵별 검색 후보·다음 검색 위치·이전 표시 기사·트리를 Redis에 저장하고 revision CAS로 늦은 변경을 거부한다. 초기 주변 목표는 4건, 하위 가지는 3건이며 재검색 0건은 기존 가지를 유지한다. 초기화해도 노드 ID를 재사용하지 않는다.

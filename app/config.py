@@ -124,6 +124,10 @@ class Settings(BaseSettings):
     v2_body_cache_seconds: int = Field(default=3600, ge=1, le=86400)
     v2_job_timeout_seconds: int = Field(default=1800, ge=30, le=3600)
     v2_job_ttl_seconds: int = Field(default=86400, ge=60, le=86400)
+    # Shared durable consumer capacity, across all v2 worker processes.
+    v2_worker_max_concurrency: int = Field(default=1, ge=1, le=10)
+    # Total pipeline starts for the same saved job, including the first run.
+    v2_worker_max_attempts: int = Field(default=2, ge=1, le=3)
 
     # ── AI 에이전트 (RAG 그라운딩 + 검증) ────────────────────────────────
     embedding_model: str = "gemini-embedding-001"  # Gemini 임베딩 (768차원 요청, generate와 별도 쿼터)

@@ -486,10 +486,16 @@ async def process_job(sid: str, job_id: str, message=None) -> str:
             return "done"
         if job.get("worker_token") and job.get("lease_until", 0) > time.time():
             return "busy"
-        if job.get("worker_token"):
-            job["worker_retries"] = job.get("worker_retries", 0) + 1
-        if job.get("worker_retries", 0) > 1:
-            exhausted = True
+        # Count persisted starts, not NATS deliveries. A duplicate still holding
+        # a live lease returned above and cannot spend another pipeline attempt.
+        # Legacy jobs only recorded recoveries; preserve their consumed starts.
+        attempts = job.get("worker_attempts")
+        if attempts is None:
+            attempts = 1 + job.get("worker_retries", 0) if job.get("worker_token") else 0
+        exhausted = attempts >= settings.v2_worker_max_attempts
+        if not exhausted:
+            attempts += 1
+        job.update(worker_attempts=attempts, worker_retries=max(0, attempts - 1))
         if job["status"] != "cancel_requested":
             job["status"] = "running"
         job.update(worker_token=token, lease_until=time.time() + 60, updated_at=timestamp())
