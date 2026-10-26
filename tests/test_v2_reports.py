@@ -284,6 +284,50 @@ async def test_duplicate_delivery_does_not_run_and_expired_lease_recovers(pipeli
     assert recovered["status"] == "completed" and recovered["worker_retries"] == 1
 
 
+async def test_persisted_pipeline_start_limit_survives_shutdown_and_duplicate(pipeline, monkeypatch):
+    sid, map_id, ids = await fixture_map()
+    admitted = await submit(sid, map_id, ids)
+    calls = []
+
+    async def interrupted(*args):
+        calls.append(args)
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(reports, "_pipeline", interrupted)
+    monkeypatch.setattr(settings, "v2_worker_max_attempts", 2)
+    for count in (1, 2):
+        with pytest.raises(asyncio.CancelledError):
+            await reports.process_job(sid, admitted["job_id"])
+        stored = await state.resource(sid, "report-job", admitted["job_id"])
+        assert stored["worker_attempts"] == count
+        # Redelivery during the current lease neither reruns nor counts.
+        assert await reports.process_job(sid, admitted["job_id"]) == "busy"
+        assert len(calls) == count
+        stored["lease_until"] = time.time() - 1
+        await reports._save_job(sid, stored)
+    assert await reports.process_job(sid, admitted["job_id"]) == "done"
+    stored = await reports.get_job(sid, admitted["job_id"])
+    assert stored["status"] == "failed" and stored["error"]["code"] == "WORKER_LOST"
+    assert stored["worker_attempts"] == 2 and len(calls) == 2
+    assert (await state.resource(sid, "map", map_id))["active_report_job_id"] is None
+    assert await reports.process_job(sid, admitted["job_id"]) == "done"
+    assert len(calls) == 2
+
+
+async def test_legacy_retry_count_cannot_reset_attempt_budget(pipeline, monkeypatch):
+    sid, map_id, ids = await fixture_map()
+    admitted = await submit(sid, map_id, ids)
+    job = await reports.get_job(sid, admitted["job_id"])
+    job.update(worker_token="legacy-worker", worker_retries=1, lease_until=time.time() - 1, status="running")
+    await reports._save_job(sid, job)
+    monkeypatch.setattr(settings, "v2_worker_max_attempts", 2)
+    assert await reports.process_job(sid, job["job_id"]) == "done"
+    result = await reports.get_job(sid, job["job_id"])
+    assert result["error"]["code"] == "WORKER_LOST"
+    assert result["worker_attempts"] == 2
+    assert pipeline["extract"] == [] and pipeline["analyze"] == []
+
+
 async def test_worker_token_loss_cannot_save_or_link(pipeline, monkeypatch):
     sid, map_id, ids = await fixture_map()
     admitted = await submit(sid, map_id, ids)
