@@ -23,7 +23,7 @@ from app.agents import (
 )
 from app.config import settings
 from app.usage_limits import check_quota
-from app.v2 import persistence, state
+from app.v2 import persistence, provider_budget, state
 from app.v2.errors import V2Error
 
 logger = logging.getLogger(__name__)
@@ -151,6 +151,8 @@ async def rag_evidence(articles: list[dict], requested: list[str]) -> list[dict]
     if not settings.use_rag:
         return []
     first = min(articles, key=lambda a: a["news_id"])
+    if settings.use_mongodb:
+        await provider_budget.reserve("rag")
     rows = await report_generator.retrieve_rag_articles(first, k=3 + len(requested))
     result = []
     seen = set(requested)
@@ -372,6 +374,7 @@ async def extract_one(article: dict) -> tuple[dict | None, dict | None]:
     cached = await persistence.body(news_id, source_url, EXTRACTOR_VERSION)
     if cached:
         return cached, None
+    await provider_budget.reserve("body")
     started = time.monotonic()
     try:
         async def fetch():
@@ -506,7 +509,7 @@ async def process_job(sid: str, job_id: str, message=None) -> str:
     heartbeat = asyncio.create_task(_heartbeat(sid, job_id, token, message))
     try:
         await _checkpoint(sid, job_id, token)
-        await asyncio.wait_for(_pipeline(sid, job_id, token), max(1, datetime.fromisoformat(job["deadline_at"]).timestamp() - time.time()))
+        await asyncio.wait_for(_budgeted_pipeline(sid, job_id, token), max(1, datetime.fromisoformat(job["deadline_at"]).timestamp() - time.time()))
         return "done"
     except JobCancelled:
         await _finish(sid, job_id, token, "cancelled")
@@ -528,7 +531,11 @@ async def process_job(sid: str, job_id: str, message=None) -> str:
         retryable = True
         if isinstance(exc, V2Error):
             code, message_text, retryable = exc.code, exc.message, exc.retryable
-        await _finish(sid, job_id, token, "failed", error={"code": code, "message": message_text, "retryable": retryable, "details": {}})
+        budget_failure = isinstance(exc, provider_budget.ProviderBudgetError)
+        await _finish(sid, job_id, token, "failed",
+                      result=current.get("result") if current and budget_failure else None,
+                      error={"code": code, "message": message_text, "retryable": retryable,
+                             "details": exc.details if budget_failure else {}})
         return "done"
     finally:
         heartbeat.cancel()
@@ -536,6 +543,11 @@ async def process_job(sid: str, job_id: str, message=None) -> str:
             await heartbeat
         except asyncio.CancelledError:
             pass
+
+
+async def _budgeted_pipeline(sid: str, job_id: str, token: str) -> None:
+    with provider_budget.job_budget(job_id):
+        await _pipeline(sid, job_id, token)
 
 
 async def _pipeline(sid: str, job_id: str, token: str) -> None:
@@ -589,9 +601,12 @@ async def _pipeline(sid: str, job_id: str, token: str) -> None:
                 report_reused = True
             else:
                 await _update(sid, job_id, token, stage="analyzing")
+                await provider_budget.reserve("analysis")
                 output = await analyze(evidence, rag)
                 await _checkpoint(sid, job_id, token)
                 await _update(sid, job_id, token, stage="verifying")
+                if settings.use_critic:
+                    await provider_budget.reserve("critic")
                 verification = await verify(output, evidence, rag)
                 await _checkpoint(sid, job_id, token)
                 await lock.assert_owned()
@@ -615,6 +630,7 @@ async def _pipeline(sid: str, job_id: str, token: str) -> None:
                 result["strategy_reused"] = True
             else:
                 await check_quota(sid, "strategies", per_session=10, global_limit=200, client_host=job.get("client_host"), per_client=settings.strategies_client_hourly_limit)
+                await provider_budget.reserve("strategy")
                 raw = await generate_strategy(report, **options)
                 output = StrategyOutput.model_validate(raw).model_dump()
                 await _checkpoint(sid, job_id, token)
@@ -622,7 +638,7 @@ async def _pipeline(sid: str, job_id: str, token: str) -> None:
                 observed = persistence.now()
                 strategy, result["strategy_reused"] = await persistence.save_strategy({**output, **options, "schema_version": 2, "strategy_id": str(uuid.uuid4()), "report_id": report["report_id"], "report_generation_key": report["generation_key"], "generation_key": strategy_key, "generation": strategy_config, "created_at": observed, "updated_at": observed})
             result["strategy_id"] = strategy["strategy_id"]
-    except (JobCancelled, LeaseLost, asyncio.CancelledError):
+    except (JobCancelled, LeaseLost, asyncio.CancelledError, provider_budget.ProviderBudgetError):
         raise
     except Exception:  # noqa: BLE001 — strategy-only failure retains the saved report
         warnings.append("STRATEGY_GENERATION_FAILED")
