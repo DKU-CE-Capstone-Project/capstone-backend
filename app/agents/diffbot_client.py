@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
+import threading
 import time
 from collections import OrderedDict
 from copy import deepcopy
@@ -22,6 +24,8 @@ from urllib.parse import unquote, urljoin, urlparse
 
 from app.agents import naver_categories
 from app.config import settings
+
+logger = logging.getLogger("econmind.diffbot")
 
 DIFFBOT_ARTICLE_URL = "https://api.diffbot.com/v3/article"
 DEFAULT_REQUEST_INTERVAL_SECONDS = 10.0
@@ -38,6 +42,70 @@ _TOKEN_FILES = (
     _BACKEND_ROOT / "token.env",
     _BACKEND_ROOT / "diffbot" / "token.txt",
 )
+
+
+class DiffbotError(RuntimeError):
+    """Provider failure with a log-safe classification.
+
+    The message never carries the request URL, token or response body:
+    ``requests`` exception text can embed the full query string.
+    """
+
+    def __init__(self, category: str, status: int | None = None, attempts: int = 0, elapsed_ms: int = 0):
+        super().__init__(f"Diffbot {category}" + (f" (HTTP {status})" if status else ""))
+        self.category = category
+        self.status = status
+        self.attempts = attempts
+        self.elapsed_ms = elapsed_ms
+
+
+_last_call = threading.local()
+_semaphore_lock = threading.Lock()
+_semaphore: threading.BoundedSemaphore | None = None
+_semaphore_size = 0
+
+
+def _provider_semaphore() -> threading.BoundedSemaphore:
+    """Process-wide cap on in-flight Diffbot requests (calls run in worker threads)."""
+    global _semaphore, _semaphore_size
+    size = max(1, int(settings.diffbot_max_concurrency))
+    with _semaphore_lock:
+        if _semaphore is None or size != _semaphore_size:
+            _semaphore, _semaphore_size = threading.BoundedSemaphore(size), size
+        return _semaphore
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def classify_status(status: int) -> str:
+    if status == 429:
+        return "rate_limit"
+    if status in (401, 403):
+        return "auth"
+    if status >= 500:
+        return "server_error"
+    return "http_error"
+
+
+def backoff_seconds(attempt: int, retry_after: float | None = None) -> float | None:
+    """Wait before retry number ``attempt`` (0-based); None means do not retry.
+
+    Exponential from DIFFBOT_BACKOFF_BASE_SECONDS, capped at
+    DIFFBOT_BACKOFF_MAX_SECONDS. A server Retry-After above the cap is not waited
+    out: retrying earlier would burn an attempt that is certain to fail.
+    """
+    cap = max(0.0, settings.diffbot_backoff_max_seconds)
+    if retry_after is not None:
+        return None if retry_after > cap else max(1.0, retry_after)
+    return min(cap, max(0.0, settings.diffbot_backoff_base_seconds) * (2**attempt))
+
+
+def _payload_error_category(payload: dict[str, Any]) -> tuple[str, int | None]:
+    code = payload.get("errorCode")
+    status = code if isinstance(code, int) else None
+    return (classify_status(status) if status else "api_error"), status
 
 
 def normalize_space(text: str) -> str:
@@ -171,40 +239,55 @@ def call_diffbot_article(
         natural_language=natural_language,
     )
     timeout_seconds = max(5, timeout_ms / 1000 + 5)
+    # Total attempts (billing-relevant) are capped regardless of the caller's max_retries.
+    max_attempts = max(1, min(max(0, max_retries) + 1, settings.diffbot_max_total_attempts))
+    started = time.monotonic()
+    _last_call.attempts, _last_call.elapsed_ms = 0, 0
 
-    for attempt in range(max_retries + 1):
+    def fail(category: str, status: int | None, attempts: int) -> DiffbotError:
+        return DiffbotError(category, status, attempts, int((time.monotonic() - started) * 1000))
+
+    for attempt in range(max_attempts):
+        attempts = attempt + 1
+        retry_after: float | None = None
         try:
-            response = requests.get(
-                DIFFBOT_ARTICLE_URL,
-                params=request_params,
-                timeout=timeout_seconds,
-            )
+            with _provider_semaphore():
+                response = requests.get(
+                    DIFFBOT_ARTICLE_URL,
+                    params=request_params,
+                    timeout=timeout_seconds,
+                )
+        except requests.Timeout:
+            category, status = "timeout", None
         except requests.RequestException:
-            if attempt >= max_retries:
-                raise
-            time.sleep(DEFAULT_REQUEST_INTERVAL_SECONDS * (attempt + 1))
-            continue
+            category, status = "network", None
+        else:
+            status = response.status_code
+            if status < 400:
+                try:
+                    payload = response.json()
+                except ValueError:
+                    raise fail("invalid_response", status, attempts) from None
+                if not isinstance(payload, dict):
+                    raise fail("invalid_response", status, attempts)
+                if payload.get("error") or payload.get("errorCode"):
+                    category, status = _payload_error_category(payload)
+                    raise fail(category, status, attempts)
+                _last_call.attempts = attempts
+                _last_call.elapsed_ms = int((time.monotonic() - started) * 1000)
+                return payload
+            category = classify_status(status)
+            if category in ("rate_limit", "server_error"):
+                retry_after = retry_after_seconds(response.headers.get("Retry-After"))
 
-        if response.status_code == 429 and attempt < max_retries:
-            wait_seconds = retry_after_seconds(response.headers.get("Retry-After"))
-            if wait_seconds is None:
-                wait_seconds = DEFAULT_REQUEST_INTERVAL_SECONDS * (attempt + 1)
-            time.sleep(max(1.0, wait_seconds))
-            continue
+        if category not in ("rate_limit", "server_error", "timeout", "network") or attempts >= max_attempts:
+            raise fail(category, status, attempts)
+        wait = backoff_seconds(attempt, retry_after)
+        if wait is None:
+            raise fail(category, status, attempts)
+        _sleep(wait)
 
-        if response.status_code >= 400:
-            detail = response.text.strip().replace(token, "<TOKEN>")
-            if len(detail) > 300:
-                detail = detail[:300] + "..."
-            raise RuntimeError(f"Diffbot HTTP {response.status_code}: {detail}")
-
-        payload = response.json()
-        if payload.get("error") or payload.get("errorCode"):
-            detail = payload.get("error") or payload.get("message") or payload.get("errorCode")
-            raise RuntimeError(f"Diffbot API error: {detail}")
-        return payload
-
-    raise RuntimeError("Diffbot API request failed after retries.")
+    raise fail("exhausted", None, max_attempts)
 
 
 def extract_primary_object(payload: dict[str, Any]) -> dict[str, Any]:
@@ -282,6 +365,14 @@ def _extract_one_sync(
     obj = extract_primary_object(payload)
     text = obj.get("text")
     diffbot_text = normalize_diffbot_text(text) if isinstance(text, str) else ""
+    if not diffbot_text:
+        logger.warning(
+            "[diffbot] extract empty: news_id=%s category=empty http_status=200 objects=%d attempts=%s elapsed_ms=%s",
+            article.get("news_id") or "-",
+            len(payload.get("objects") or []),
+            getattr(_last_call, "attempts", "-"),
+            getattr(_last_call, "elapsed_ms", "-"),
+        )
     image_url = extract_image_url(obj, url, obj.get("meta") or payload.get("meta"))
     fields = {}
     if diffbot_text:
@@ -293,6 +384,24 @@ def _extract_one_sync(
     if fields:
         fields["content_source_url"] = url
     return {**article, **fields} if fields else article
+
+
+def _log_extract_failure(article: dict[str, Any], exc: Exception, started: float) -> None:
+    """One structured line per failed extraction; only classification fields, never URLs or bodies."""
+    if isinstance(exc, DiffbotError):
+        category, status, attempts, elapsed_ms = exc.category, exc.status, exc.attempts, exc.elapsed_ms
+    else:
+        category, status, attempts = "unexpected", None, "-"
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+    logger.warning(
+        "[diffbot] extract skip: news_id=%s category=%s http_status=%s attempts=%s elapsed_ms=%s error_type=%s",
+        article.get("news_id") or "-",
+        category,
+        status if status is not None else "-",
+        attempts,
+        elapsed_ms,
+        type(exc).__name__,
+    )
 
 
 async def extract_articles_with_diffbot(
@@ -332,6 +441,7 @@ async def extract_articles_with_diffbot(
                 _extraction_cache.move_to_end(cache_key)
                 return {**article, **deepcopy(cached[1])}
             fields = {}
+            started = time.monotonic()
             try:
                 extracted = await asyncio.to_thread(
                     _extract_one_sync,
@@ -343,7 +453,7 @@ async def extract_articles_with_diffbot(
                 if extracted is not article:
                     fields = {key: extracted[key] for key in _CACHE_FIELDS if key in extracted}
             except Exception as exc:  # noqa: BLE001
-                print(f"[diffbot] extract skip: {type(exc).__name__}")
+                _log_extract_failure(article, exc, started)
             usable = fields.get("thumbnail_url") or fields.get("cleaned_content")
             _extraction_cache[cache_key] = (time.monotonic() + (3600 if usable else 30), deepcopy(fields))
             _extraction_cache.move_to_end(cache_key)

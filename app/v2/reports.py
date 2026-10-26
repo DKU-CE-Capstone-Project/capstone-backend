@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 import uuid
@@ -24,6 +25,8 @@ from app.config import settings
 from app.usage_limits import check_quota
 from app.v2 import persistence, state
 from app.v2.errors import V2Error
+
+logger = logging.getLogger(__name__)
 
 TERMINAL = {"completed", "failed", "cancelled"}
 EXTRACTOR_VERSION = "article-body-v1"
@@ -369,6 +372,7 @@ async def extract_one(article: dict) -> tuple[dict | None, dict | None]:
     cached = await persistence.body(news_id, source_url, EXTRACTOR_VERSION)
     if cached:
         return cached, None
+    started = time.monotonic()
     try:
         async def fetch():
             if article.get("naver_url"):
@@ -393,6 +397,8 @@ async def extract_one(article: dict) -> tuple[dict | None, dict | None]:
     except Exception:  # noqa: BLE001 — provider failures become per-article evidence failures
         body_doc, failure_doc = None, failure
     if failure_doc:
+        # Provider-level cause (HTTP status, category, attempts) is logged by econmind.diffbot with the same news_id.
+        logger.warning("[v2-body] extract failed: news_id=%s code=%s elapsed_ms=%d", news_id, failure_doc["code"], int((time.monotonic() - started) * 1000))
         await state.put(failure_key, {k: v for k, v in failure_doc.items() if k != "news_id"}, 30)
         return None, failure_doc
     # Persistence failures must fail the job, not masquerade as extraction failure.
