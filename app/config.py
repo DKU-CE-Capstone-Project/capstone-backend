@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     diffbot_api_key: str = ""
     diffbot_search_timeout_ms: int = Field(default=10000, ge=1000, le=30000)
     diffbot_search_concurrency: int = Field(default=3, ge=1, le=5)
+    # Process-wide provider guard: in-flight requests, billable attempts per article, backoff.
+    diffbot_max_concurrency: int = Field(default=3, ge=1, le=10)
+    diffbot_max_total_attempts: int = Field(default=4, ge=1, le=6)
+    diffbot_backoff_base_seconds: float = Field(default=10.0, ge=0, le=60)
+    diffbot_backoff_max_seconds: float = Field(default=60.0, ge=0, le=300)
     google_api_key: str = ""
     openai_api_key: SecretStr = Field(default=SecretStr(""), validation_alias=AliasChoices("OPENAI_API_KEY", "OAI_KEY"))
     use_mock_news: bool = False
