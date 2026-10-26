@@ -1,4 +1,5 @@
-"""Diffbot failure classification, log hygiene, concurrency cap and bounded backoff (all mocked)."""
+"""Diffbot diagnostics and cancellation-aware provider protection (all mocked)."""
+import asyncio
 import logging
 import threading
 import time
@@ -68,9 +69,9 @@ def patch_get(monkeypatch, *outcomes):
         (FakeResponse(404), "http_error", 404),
         (requests.Timeout(f"timed out {URL}"), "timeout", None),
         (requests.ConnectionError(f"refused {URL}&token={TOKEN}"), "network", None),
-        (FakeResponse(200, {"errorCode": 401, "error": "Not authorized API token."}), "auth", 401),
-        (FakeResponse(200, {"errorCode": 429, "error": "rate"}), "rate_limit", 429),
-        (FakeResponse(200, {"error": "boom"}), "api_error", None),
+        (FakeResponse(200, {"errorCode": 401, "error": "Not authorized API token."}), "auth", 200),
+        (FakeResponse(200, {"errorCode": 429, "error": "rate"}), "rate_limit", 200),
+        (FakeResponse(200, {"error": "boom"}), "api_error", 200),
         (FakeResponse(200, ValueError), "invalid_response", 200),
     ],
 )
@@ -89,8 +90,6 @@ def test_failure_log_has_diagnostics_and_no_secrets(monkeypatch, caplog):
     patch_get(monkeypatch, FakeResponse(429, text=f"quota exceeded {TOKEN} BODYSECRET"))
     monkeypatch.setattr(diffbot, "load_diffbot_token", lambda: TOKEN)
     caplog.set_level(logging.DEBUG)
-    import asyncio
-
     out = asyncio.run(diffbot.extract_articles_with_diffbot([dict(ARTICLE)], token=TOKEN, max_retries=0))
     assert out == [ARTICLE]
     text = caplog.text
@@ -103,8 +102,6 @@ def test_failure_log_has_diagnostics_and_no_secrets(monkeypatch, caplog):
 def test_network_error_log_does_not_leak_url_or_token(monkeypatch, caplog):
     patch_get(monkeypatch, requests.ConnectionError(f"HTTPSConnectionPool url: /v3/article?token={TOKEN}&url={URL}"))
     caplog.set_level(logging.DEBUG)
-    import asyncio
-
     asyncio.run(diffbot.extract_articles_with_diffbot([dict(ARTICLE)], token=TOKEN, max_retries=0))
     assert "category=network" in caplog.text
     assert TOKEN not in caplog.text and "URLSECRET" not in caplog.text
@@ -160,6 +157,129 @@ def test_auth_failure_is_not_retried(monkeypatch, fast):
     with pytest.raises(diffbot.DiffbotError):
         call(max_retries=3)
     assert len(seen) == 1 and fast == []
+
+
+@pytest.mark.parametrize("code", [429, 503])
+def test_retryable_payload_error_uses_same_bounded_retry_loop(monkeypatch, fast, code):
+    seen = patch_get(monkeypatch, FakeResponse(200, {"errorCode": code, "error": "synthetic"}), FakeResponse(200, {"objects": []}))
+    assert call(max_retries=3) == {"objects": []}
+    assert len(seen) == 2 and fast == [10.0]
+
+
+def test_payload_auth_is_not_retried_and_transport_status_is_preserved(monkeypatch, fast):
+    seen = patch_get(monkeypatch, FakeResponse(200, {"errorCode": 401, "error": "synthetic"}))
+    with pytest.raises(diffbot.DiffbotError) as info:
+        call(max_retries=3)
+    assert len(seen) == 1 and fast == []
+    assert info.value.status == 200
+    assert info.value.provider_error_code == 401
+
+
+async def test_payload_failure_log_separates_transport_and_provider_status(monkeypatch, caplog):
+    patch_get(monkeypatch, FakeResponse(200, {"errorCode": 429, "error": f"{TOKEN} BODYSECRET"}))
+    caplog.set_level(logging.WARNING)
+    await diffbot.extract_articles_with_diffbot([dict(ARTICLE)], token=TOKEN, max_retries=0, use_cache=False)
+    assert "http_status=200 provider_error_code=429 attempts=1" in caplog.text
+    assert TOKEN not in caplog.text and "BODYSECRET" not in caplog.text
+
+
+def test_deadline_waiting_for_slot_never_starts_http(monkeypatch):
+    semaphore = threading.BoundedSemaphore(1)
+    semaphore.acquire()
+    monkeypatch.setattr(diffbot, "_provider_semaphore", lambda: semaphore)
+    seen = patch_get(monkeypatch, FakeResponse())
+    try:
+        with pytest.raises(diffbot.DiffbotError) as info:
+            diffbot.call_diffbot_article(URL, TOKEN, max_retries=3, deadline=time.monotonic() + 0.03)
+    finally:
+        semaphore.release()
+    assert info.value.category == "deadline" and info.value.attempts == 0
+    assert seen == []
+
+
+def test_deadline_does_not_start_a_retry_or_wait_out_its_backoff(monkeypatch, fast):
+    seen = patch_get(monkeypatch, FakeResponse(503))
+    with pytest.raises(diffbot.DiffbotError) as info:
+        diffbot.call_diffbot_article(URL, TOKEN, max_retries=3, deadline=time.monotonic() + 0.1)
+    assert info.value.category == "deadline" and info.value.attempts == 1
+    assert len(seen) == 1 and fast == []
+
+
+async def _wait_thread_event(event):
+    assert await asyncio.wait_for(asyncio.to_thread(event.wait, 2), 3)
+
+
+async def test_cancelled_extraction_waiting_for_slot_never_starts_http(monkeypatch):
+    semaphore = threading.BoundedSemaphore(1)
+    first_started, release_first = threading.Event(), threading.Event()
+    second_waiting, second_finished = threading.Event(), threading.Event()
+    seen = []
+    sync = diffbot._extract_one_sync
+
+    def provider_semaphore():
+        if first_started.is_set():
+            second_waiting.set()
+        return semaphore
+
+    def extract(article, *args, **kwargs):
+        try:
+            return sync(article, *args, **kwargs)
+        finally:
+            if article["news_id"] == "second":
+                second_finished.set()
+
+    def get(*args, **kwargs):
+        seen.append(kwargs["params"]["url"])
+        first_started.set()
+        assert release_first.wait(2)
+        return FakeResponse(200, {"objects": [{"text": "body"}]})
+
+    monkeypatch.setattr(diffbot, "_provider_semaphore", provider_semaphore)
+    monkeypatch.setattr(diffbot, "_extract_one_sync", extract)
+    monkeypatch.setattr(requests, "get", get)
+    first = asyncio.create_task(diffbot.extract_articles_with_diffbot([{"news_id": "first", "url": URL}], token=TOKEN, max_retries=0, use_cache=False))
+    await _wait_thread_event(first_started)
+    second = asyncio.create_task(diffbot.extract_articles_with_diffbot([{"news_id": "second", "url": URL + "second"}], token=TOKEN, max_retries=0, use_cache=False))
+    try:
+        await _wait_thread_event(second_waiting)
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+    finally:
+        release_first.set()
+    await first
+    await _wait_thread_event(second_finished)
+    assert seen == [URL]
+    # Cancelled waiters must not consume/leak a slot.
+    assert semaphore.acquire(blocking=False)
+    semaphore.release()
+
+
+async def test_cancelled_extraction_during_backoff_never_starts_retry(monkeypatch):
+    first_called, finished = threading.Event(), threading.Event()
+    seen = []
+    sync = diffbot._extract_one_sync
+
+    def extract(*args, **kwargs):
+        try:
+            return sync(*args, **kwargs)
+        finally:
+            finished.set()
+
+    def get(*args, **kwargs):
+        seen.append(1)
+        first_called.set()
+        return FakeResponse(429)
+
+    monkeypatch.setattr(diffbot, "_extract_one_sync", extract)
+    monkeypatch.setattr(requests, "get", get)
+    task = asyncio.create_task(diffbot.extract_articles_with_diffbot([dict(ARTICLE)], token=TOKEN, max_retries=3, use_cache=False))
+    await _wait_thread_event(first_called)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _wait_thread_event(finished)
+    assert seen == [1]
 
 
 def test_concurrency_is_capped(monkeypatch):

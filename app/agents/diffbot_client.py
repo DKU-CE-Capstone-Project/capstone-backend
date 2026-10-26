@@ -15,6 +15,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -51,12 +52,13 @@ class DiffbotError(RuntimeError):
     ``requests`` exception text can embed the full query string.
     """
 
-    def __init__(self, category: str, status: int | None = None, attempts: int = 0, elapsed_ms: int = 0):
+    def __init__(self, category: str, status: int | None = None, attempts: int = 0, elapsed_ms: int = 0, *, provider_error_code: int | None = None):
         super().__init__(f"Diffbot {category}" + (f" (HTTP {status})" if status else ""))
         self.category = category
         self.status = status
         self.attempts = attempts
         self.elapsed_ms = elapsed_ms
+        self.provider_error_code = provider_error_code
 
 
 _last_call = threading.local()
@@ -77,6 +79,32 @@ def _provider_semaphore() -> threading.BoundedSemaphore:
 
 def _sleep(seconds: float) -> None:
     time.sleep(seconds)
+
+
+def _interrupted(cancel_event: threading.Event | None, deadline: float | None) -> str | None:
+    if cancel_event is not None and cancel_event.is_set():
+        return "cancelled"
+    if deadline is not None and time.monotonic() >= deadline:
+        return "deadline"
+    return None
+
+
+@contextmanager
+def _provider_slot(cancel_event: threading.Event | None, deadline: float | None):
+    """Do not leave a queued thread able to send after its async caller expires."""
+    semaphore = _provider_semaphore()
+    while True:
+        if reason := _interrupted(cancel_event, deadline):
+            raise DiffbotError(reason)
+        wait = 0.05 if deadline is None else min(0.05, max(0, deadline - time.monotonic()))
+        if semaphore.acquire(timeout=wait):
+            break
+    try:
+        if reason := _interrupted(cancel_event, deadline):
+            raise DiffbotError(reason)
+        yield
+    finally:
+        semaphore.release()
 
 
 def classify_status(status: int) -> str:
@@ -225,7 +253,15 @@ def call_diffbot_article(
     use_proxy: bool = False,
     natural_language: str | None = None,
     max_retries: int = DEFAULT_MAX_RETRIES,
+    *,
+    cancel_event: threading.Event | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
+    """Stop queued/new attempts on cancellation or deadline.
+
+    A request already sent cannot be recalled; its transport timeout still applies.
+    ``deadline`` uses the same monotonic clock as the async extraction caller.
+    """
     import requests
 
     request_params = build_article_params(
@@ -244,19 +280,24 @@ def call_diffbot_article(
     started = time.monotonic()
     _last_call.attempts, _last_call.elapsed_ms = 0, 0
 
-    def fail(category: str, status: int | None, attempts: int) -> DiffbotError:
-        return DiffbotError(category, status, attempts, int((time.monotonic() - started) * 1000))
+    def fail(category: str, status: int | None, attempts: int, provider_error_code: int | None = None) -> DiffbotError:
+        return DiffbotError(category, status, attempts, int((time.monotonic() - started) * 1000), provider_error_code=provider_error_code)
 
+    attempts = 0
     for attempt in range(max_attempts):
-        attempts = attempt + 1
         retry_after: float | None = None
+        provider_error_code: int | None = None
         try:
-            with _provider_semaphore():
+            with _provider_slot(cancel_event, deadline):
+                request_timeout = timeout_seconds if deadline is None else min(timeout_seconds, max(0.001, deadline - time.monotonic()))
+                attempts += 1
                 response = requests.get(
                     DIFFBOT_ARTICLE_URL,
                     params=request_params,
-                    timeout=timeout_seconds,
+                    timeout=request_timeout,
                 )
+        except DiffbotError as exc:
+            raise fail(exc.category, None, attempts) from None
         except requests.Timeout:
             category, status = "timeout", None
         except requests.RequestException:
@@ -271,21 +312,31 @@ def call_diffbot_article(
                 if not isinstance(payload, dict):
                     raise fail("invalid_response", status, attempts)
                 if payload.get("error") or payload.get("errorCode"):
-                    category, status = _payload_error_category(payload)
-                    raise fail(category, status, attempts)
-                _last_call.attempts = attempts
-                _last_call.elapsed_ms = int((time.monotonic() - started) * 1000)
-                return payload
-            category = classify_status(status)
+                    category, provider_error_code = _payload_error_category(payload)
+                else:
+                    _last_call.attempts = attempts
+                    _last_call.elapsed_ms = int((time.monotonic() - started) * 1000)
+                    return payload
+            else:
+                category = classify_status(status)
             if category in ("rate_limit", "server_error"):
                 retry_after = retry_after_seconds(response.headers.get("Retry-After"))
 
         if category not in ("rate_limit", "server_error", "timeout", "network") or attempts >= max_attempts:
-            raise fail(category, status, attempts)
+            raise fail(category, status, attempts, provider_error_code)
         wait = backoff_seconds(attempt, retry_after)
         if wait is None:
-            raise fail(category, status, attempts)
-        _sleep(wait)
+            raise fail(category, status, attempts, provider_error_code)
+        if reason := _interrupted(cancel_event, deadline):
+            raise fail(reason, status, attempts, provider_error_code)
+        if deadline is not None and time.monotonic() + wait >= deadline:
+            raise fail("deadline", status, attempts, provider_error_code)
+        if cancel_event is None:
+            _sleep(wait)
+        else:
+            cancel_event.wait(wait)
+        if reason := _interrupted(cancel_event, deadline):
+            raise fail(reason, status, attempts, provider_error_code)
 
     raise fail("exhausted", None, max_attempts)
 
@@ -350,6 +401,9 @@ def _extract_one_sync(
     token: str,
     timeout_ms: int,
     max_retries: int,
+    *,
+    cancel_event: threading.Event | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     url = article.get("naver_url") or article.get("url", "")
     if not url:
@@ -361,6 +415,8 @@ def _extract_one_sync(
         timeout_ms=timeout_ms,
         discussion=False,
         max_retries=max(0, max_retries),
+        cancel_event=cancel_event,
+        deadline=deadline,
     )
     obj = extract_primary_object(payload)
     text = obj.get("text")
@@ -390,14 +446,17 @@ def _log_extract_failure(article: dict[str, Any], exc: Exception, started: float
     """One structured line per failed extraction; only classification fields, never URLs or bodies."""
     if isinstance(exc, DiffbotError):
         category, status, attempts, elapsed_ms = exc.category, exc.status, exc.attempts, exc.elapsed_ms
+        provider_error_code = exc.provider_error_code
     else:
         category, status, attempts = "unexpected", None, "-"
+        provider_error_code = None
         elapsed_ms = int((time.monotonic() - started) * 1000)
     logger.warning(
-        "[diffbot] extract skip: news_id=%s category=%s http_status=%s attempts=%s elapsed_ms=%s error_type=%s",
+        "[diffbot] extract skip: news_id=%s category=%s http_status=%s provider_error_code=%s attempts=%s elapsed_ms=%s error_type=%s",
         article.get("news_id") or "-",
         category,
         status if status is not None else "-",
+        provider_error_code if provider_error_code is not None else "-",
         attempts,
         elapsed_ms,
         type(exc).__name__,
@@ -412,6 +471,7 @@ async def extract_articles_with_diffbot(
     max_retries: int = DEFAULT_MAX_RETRIES,
     concurrency: int = 2,
     use_cache: bool = True,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     token = token if token is not None else load_diffbot_token()
     if not articles:
@@ -442,6 +502,7 @@ async def extract_articles_with_diffbot(
                 return {**article, **deepcopy(cached[1])}
             fields = {}
             started = time.monotonic()
+            cancel_event = threading.Event()
             try:
                 extracted = await asyncio.to_thread(
                     _extract_one_sync,
@@ -449,11 +510,18 @@ async def extract_articles_with_diffbot(
                     token,
                     timeout_ms,
                     max_retries,
+                    cancel_event=cancel_event,
+                    deadline=deadline,
                 )
                 if extracted is not article:
                     fields = {key: extracted[key] for key in _CACHE_FIELDS if key in extracted}
+            except asyncio.CancelledError:
+                cancel_event.set()
+                raise
             except Exception as exc:  # noqa: BLE001
                 _log_extract_failure(article, exc, started)
+            finally:
+                cancel_event.set()
             usable = fields.get("thumbnail_url") or fields.get("cleaned_content")
             _extraction_cache[cache_key] = (time.monotonic() + (3600 if usable else 30), deepcopy(fields))
             _extraction_cache.move_to_end(cache_key)

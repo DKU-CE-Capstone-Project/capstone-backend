@@ -384,7 +384,7 @@ async def extract_one(article: dict) -> tuple[dict | None, dict | None]:
             # Legacy news.content has no proven extraction time/version. Do not
             # label it as a new observation when credentials/extraction fail.
             extraction_input = {k: v for k, v in article.items() if k not in ("cleaned_content", "content_source_url")}
-            rows = await diffbot_client.extract_articles_with_diffbot([extraction_input], max_articles=1, timeout_ms=min(30000, int(settings.v2_body_timeout_seconds * 1000)), concurrency=1, max_retries=0, use_cache=False)
+            rows = await diffbot_client.extract_articles_with_diffbot([extraction_input], max_articles=1, timeout_ms=min(30000, int(settings.v2_body_timeout_seconds * 1000)), concurrency=1, max_retries=0, use_cache=False, deadline=started + settings.v2_body_timeout_seconds)
             content = diffbot_client.normalize_diffbot_text(rows[0].get("cleaned_content") or "") if rows else ""
             if not content:
                 return None, {**failure, "code": "BODY_EMPTY", "message": "분석할 기사 본문이 비어 있습니다."}
