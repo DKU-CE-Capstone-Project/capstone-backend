@@ -8,6 +8,7 @@ import logging
 import re
 import time
 import uuid
+from collections import deque
 from copy import deepcopy
 from datetime import datetime
 from typing import Literal
@@ -361,21 +362,33 @@ async def _heartbeat(sid: str, job_id: str, token: str, message) -> None:
             return
 
 
-async def extract_one(article: dict) -> tuple[dict | None, dict | None]:
+def _raise_if_cancelled() -> None:
+    # Python 3.11 wait_for can return an already completed child while its
+    # caller concurrently receives cancellation. Do not start another HTTP.
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError
+
+
+async def extract_one(article: dict, *, token: str | None = None, deadline: float | None = None,
+                      bypass_failure_cache: bool = False, charge_budget: bool = True,
+                      attempt_state: dict | None = None) -> tuple[dict | None, dict | None]:
     news_id = article["news_id"]
     source_url = article.get("naver_url") or article.get("url") or ""
     failure = {"news_id": news_id, "code": "EXTRACTION_FAILED", "message": "기사 본문을 추출하지 못했습니다.", "retryable": True}
     if not source_url:
         return None, {**failure, "code": "ARTICLE_UNAVAILABLE", "message": "기사 원문 주소를 확인할 수 없습니다.", "retryable": False}
     failure_key = f"v2:body-failure:{text_hash(source_url)}:{EXTRACTOR_VERSION}"
-    cached_failure = await state.get(failure_key)
+    cached_failure = None if bypass_failure_cache else await state.get(failure_key)
     if cached_failure:
         return None, {**failure, **cached_failure, "news_id": news_id}
     cached = await persistence.body(news_id, source_url, EXTRACTOR_VERSION)
     if cached:
         return cached, None
-    await provider_budget.reserve("body")
+    if charge_budget:
+        await provider_budget.reserve("body")
     started = time.monotonic()
+    expires = min(started + settings.v2_body_timeout_seconds, deadline) if deadline is not None else started + settings.v2_body_timeout_seconds
     try:
         async def fetch():
             if article.get("naver_url"):
@@ -387,25 +400,103 @@ async def extract_one(article: dict) -> tuple[dict | None, dict | None]:
             # Legacy news.content has no proven extraction time/version. Do not
             # label it as a new observation when credentials/extraction fail.
             extraction_input = {k: v for k, v in article.items() if k not in ("cleaned_content", "content_source_url")}
-            rows = await diffbot_client.extract_articles_with_diffbot([extraction_input], max_articles=1, timeout_ms=min(30000, int(settings.v2_body_timeout_seconds * 1000)), concurrency=1, max_retries=0, use_cache=False, deadline=started + settings.v2_body_timeout_seconds)
+            if attempt_state is not None:
+                attempt_state["provider_called"] = True
+            rows = await diffbot_client.extract_articles_with_diffbot([extraction_input], token=token, max_articles=1, timeout_ms=min(30000, int(settings.v2_body_timeout_seconds * 1000)), concurrency=1, max_retries=0, use_cache=False, deadline=expires, raise_errors=True)
             content = diffbot_client.normalize_diffbot_text(rows[0].get("cleaned_content") or "") if rows else ""
             if not content:
                 return None, {**failure, "code": "BODY_EMPTY", "message": "분석할 기사 본문이 비어 있습니다."}
             observed = persistence.now()
             doc = {"schema_version": 2, "body_id": str(uuid.uuid4()), "news_id": news_id, "source_url": source_url, "content": content, "content_hash": text_hash(content), "extractor_provider": "diffbot", "extractor_version": EXTRACTOR_VERSION, "extracted_at": observed, "created_at": observed}
             return doc, None
-        body_doc, failure_doc = await asyncio.wait_for(fetch(), settings.v2_body_timeout_seconds)
+        body_doc, failure_doc = await asyncio.wait_for(fetch(), max(0, expires - time.monotonic()))
+    except diffbot_client.DiffbotError as exc:
+        codes = {"rate_limit": "BODY_RATE_LIMITED", "timeout": "EXTRACTION_TIMEOUT", "deadline": "EXTRACTION_TIMEOUT",
+                 "network": "EXTRACTION_NETWORK", "server_error": "EXTRACTION_PROVIDER_ERROR", "auth": "EXTRACTION_AUTH"}
+        body_doc, failure_doc = None, {**failure, "code": codes.get(exc.category, "EXTRACTION_FAILED"),
+                                      "retryable": exc.category in {"rate_limit", "timeout", "deadline", "network", "server_error"}}
     except TimeoutError:
         body_doc, failure_doc = None, {**failure, "code": "EXTRACTION_TIMEOUT", "message": "기사 본문 추출 시간이 초과되었습니다."}
     except Exception:  # noqa: BLE001 — provider failures become per-article evidence failures
         body_doc, failure_doc = None, failure
+    _raise_if_cancelled()
     if failure_doc:
         # Provider-level cause (HTTP status, category, attempts) is logged by econmind.diffbot with the same news_id.
         logger.warning("[v2-body] extract failed: news_id=%s code=%s elapsed_ms=%d", news_id, failure_doc["code"], int((time.monotonic() - started) * 1000))
-        await state.put(failure_key, {k: v for k, v in failure_doc.items() if k != "news_id"}, 30)
+        if not bypass_failure_cache:
+            await state.put(failure_key, {k: v for k, v in failure_doc.items() if k != "news_id"}, 30)
         return None, failure_doc
     # Persistence failures must fail the job, not masquerade as extraction failure.
     return await persistence.save_body(body_doc), None
+
+
+async def extract_bodies(sid: str, job_id: str, token: str, news_ids: list[str]):
+    """One HTTP at a time; keep its key until 429; retry only pending evidence.
+
+    The shared budget charges one logical body operation per uncached article.
+    Individual HTTP calls have no hidden retry; the whole queue has a 60s cap.
+    """
+    started = time.monotonic()
+    deadline = started + settings.v2_body_batch_timeout_seconds
+    pending = deque(sorted(news_ids))
+    keys = diffbot_client.load_diffbot_tokens()
+    key_index = 0
+    articles, successes, failures, charged = {}, {}, {}, set()
+    attempts = 0
+    retry_codes = {"BODY_RATE_LIMITED", "EXTRACTION_TIMEOUT", "EXTRACTION_NETWORK", "EXTRACTION_PROVIDER_ERROR"}
+    while pending and time.monotonic() < deadline:
+        await _checkpoint(sid, job_id, token)
+        _raise_if_cancelled()
+        news_id = pending.popleft()
+        if news_id not in articles:
+            articles[news_id] = await store.get_news(news_id)
+        article = articles[news_id]
+        attempt_state = {}
+        if article:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                pending.appendleft(news_id)
+                break
+            try:
+                body, failure = await asyncio.wait_for(
+                    extract_one(article, token=keys[key_index] if keys else None, deadline=deadline,
+                                bypass_failure_cache=True, charge_budget=news_id not in charged,
+                                attempt_state=attempt_state), remaining)
+            except TimeoutError:
+                body, failure = None, {"news_id": news_id, "code": "EXTRACTION_TIMEOUT", "message": "본문 추출 전체 제한 시간을 초과했습니다.", "retryable": True}
+            _raise_if_cancelled()
+            charged.add(news_id)
+        else:
+            body, failure = None, {"news_id": news_id, "code": "ARTICLE_UNAVAILABLE", "message": "기사를 조회할 수 없습니다.", "retryable": False}
+        await _checkpoint(sid, job_id, token)
+        if attempt_state.get("provider_called"):
+            attempts += 1
+        if body:
+            successes[news_id] = (article, body)
+            failures.pop(news_id, None)
+        else:
+            failures[news_id] = failure
+            if failure["code"] == "BODY_RATE_LIMITED" and keys:
+                key_index = (key_index + 1) % len(keys)
+            if failure["code"] in retry_codes and failure["retryable"]:
+                pending.append(news_id)
+        finished_failures = len([nid for nid in failures if nid not in pending])
+        await _update(sid, job_id, token, progress={"requested": len(news_ids), "processed": len(successes) + finished_failures,
+                                                  "succeeded": len(successes), "failed": finished_failures})
+        if pending and attempt_state.get("provider_called"):
+            gap = settings.v2_body_request_interval_seconds
+            remaining = deadline - time.monotonic()
+            if remaining <= gap:
+                break
+            await asyncio.sleep(gap)
+    await _checkpoint(sid, job_id, token)
+    for news_id in pending:
+        failures.setdefault(news_id, {"news_id": news_id, "code": "EXTRACTION_TIMEOUT", "message": "본문 추출 전체 제한 시간을 초과했습니다.", "retryable": True})
+    await _update(sid, job_id, token, progress={"requested": len(news_ids), "processed": len(news_ids),
+                                              "succeeded": len(successes), "failed": len(failures)})
+    logger.info("[v2-body] batch complete: requested=%d succeeded=%d failed=%d attempts=%d elapsed_ms=%d",
+                len(news_ids), len(successes), len(failures), attempts, int((time.monotonic() - started) * 1000))
+    return list(successes.values()), list(failures.values()), [article for article in articles.values() if article]
 
 
 async def _finish(sid: str, job_id: str, token: str, status: str, *, result=None, warnings=None, error=None) -> None:
@@ -559,32 +650,7 @@ async def _pipeline(sid: str, job_id: str, token: str) -> None:
     warnings = list(job["warnings"])
     if report is None:
         await _update(sid, job_id, token, stage="extracting", progress={"requested": len(request["news_ids"]), "processed": 0, "succeeded": 0, "failed": 0})
-        successes, failed, articles = [], [], []
-        sem = asyncio.Semaphore(settings.v2_body_concurrency)
-
-        async def extract(news_id):
-            async with sem:
-                await _checkpoint(sid, job_id, token)
-                article = await store.get_news(news_id)
-                if article:
-                    body_doc, failure_doc = await extract_one(article)
-                    articles.append(article)
-                else:
-                    body_doc, failure_doc = None, {"news_id": news_id, "code": "ARTICLE_UNAVAILABLE", "message": "기사를 조회할 수 없습니다.", "retryable": False}
-                await _checkpoint(sid, job_id, token)
-                if body_doc:
-                    successes.append((article, body_doc))
-                else:
-                    failed.append(failure_doc)
-                await _update(sid, job_id, token, progress={"requested": len(request["news_ids"]), "processed": len(successes) + len(failed), "succeeded": len(successes), "failed": len(failed)})
-        tasks = [asyncio.create_task(extract(nid)) for nid in sorted(request["news_ids"])]
-        try:
-            await asyncio.gather(*tasks)
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+        successes, failed, articles = await extract_bodies(sid, job_id, token, request["news_ids"])
         if not successes:
             raise V2Error(422, "NO_USABLE_EVIDENCE", "요청한 기사의 본문을 모두 사용할 수 없어 분석을 생성하지 않았습니다.", True)
         evidence = prepare_evidence(successes)

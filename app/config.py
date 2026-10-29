@@ -24,9 +24,10 @@ class Settings(BaseSettings):
     naver_timeout_seconds: float = Field(default=10, gt=0, le=30)
     diffbot_token: str = ""
     diffbot_api_key: str = ""
+    diffbot_token_secondary: str = ""
     diffbot_search_timeout_ms: int = Field(default=10000, ge=1000, le=30000)
     diffbot_search_concurrency: int = Field(default=3, ge=1, le=5)
-    # Process-wide provider guard: in-flight requests, billable attempts per article, backoff.
+    # Process-wide HTTP cap; per-article attempts across all keys; same-key backoff.
     diffbot_max_concurrency: int = Field(default=3, ge=1, le=10)
     diffbot_max_total_attempts: int = Field(default=4, ge=1, le=6)
     diffbot_backoff_base_seconds: float = Field(default=10.0, ge=0, le=60)
@@ -120,7 +121,9 @@ class Settings(BaseSettings):
     v2_max_map_depth: int = Field(default=5, ge=1, le=10)
     v2_branch_history_limit: int = Field(default=100, ge=4, le=1000)
     v2_body_timeout_seconds: float = Field(default=30, gt=0, le=120)
-    v2_body_concurrency: int = Field(default=3, ge=1, le=10)
+    v2_body_concurrency: int = Field(default=1, ge=1, le=1)
+    v2_body_batch_timeout_seconds: float = Field(default=60, gt=0, le=60)
+    v2_body_request_interval_seconds: float = Field(default=1, ge=0, le=10)
     v2_body_cache_seconds: int = Field(default=3600, ge=1, le=86400)
     v2_job_timeout_seconds: int = Field(default=1800, ge=30, le=3600)
     v2_job_ttl_seconds: int = Field(default=86400, ge=60, le=86400)

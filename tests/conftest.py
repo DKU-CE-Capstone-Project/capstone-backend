@@ -33,6 +33,8 @@ def offline_settings(monkeypatch):
         "news_provider": "gdelt",
         "diffbot_token": "",
         "diffbot_api_key": "",
+        "diffbot_token_secondary": "",
+        "v2_body_request_interval_seconds": 0,
         "use_mongodb": False,
         "mongodb_required": False,
         "session_store_required": False,
@@ -62,6 +64,9 @@ def offline_settings(monkeypatch):
     keywords_api.clear_keyword_map_cache()
     monkeypatch.delenv("DIFFBOT_TOKEN", raising=False)
     monkeypatch.delenv("DIFFBOT_API_KEY", raising=False)
+    monkeypatch.delenv("DIFFBOT_TOKEN_SECONDARY", raising=False)
+    monkeypatch.setattr(diffbot_client, "_token_rotation_pool", ())
+    monkeypatch.setattr(diffbot_client, "_token_rotation_index", 0)
     for cache in (
         store.news_cache,
         store.summary_cache,
