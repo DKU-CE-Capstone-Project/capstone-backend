@@ -47,12 +47,14 @@ def main() -> None:
         "SESSION_STORE_REQUIRED": "true", "V2_STATE_MEMORY": "false",
         "SESSION_COOKIE_SECURE": "false", "SESSION_COOKIE_SAMESITE": "lax",
         "PROTOTYPE_TIER": args.tier, "PAID_DEMO_ENABLED": "true" if args.tier == "PAID" else "false",
+        "V2_BODY_CONCURRENCY": "1", "V2_BODY_BATCH_TIMEOUT_SECONDS": "60", "V2_BODY_REQUEST_INTERVAL_SECONDS": "1",
         "CORS_ORIGINS": "http://127.0.0.1:5196,http://localhost:5196,http://127.0.0.1:5173,http://localhost:5173",
         "USE_LLM_METADATA": "false", "USE_LLM_SUMMARIES": "false",
         "USE_RAG": "false", "USE_CRITIC": "true" if reports_enabled else "false",
         "LLM_PROVIDER": "gemini",
         "GOOGLE_API_KEY": "", "ANTHROPIC_API_KEY": "",
         "DIFFBOT_TOKEN": "", "DIFFBOT_API_KEY": "",
+        "DIFFBOT_TOKEN_SECONDARY": (credentials.get("DIFFBOT_TOKEN_SECONDARY") or "").strip() if reports_enabled else "",
     })
     os.environ.update({name: value.strip() for name, value in required.items()})
     sys.path.insert(0, str(ROOT))

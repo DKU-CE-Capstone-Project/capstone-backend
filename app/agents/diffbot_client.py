@@ -52,19 +52,23 @@ class DiffbotError(RuntimeError):
     ``requests`` exception text can embed the full query string.
     """
 
-    def __init__(self, category: str, status: int | None = None, attempts: int = 0, elapsed_ms: int = 0, *, provider_error_code: int | None = None):
+    def __init__(self, category: str, status: int | None = None, attempts: int = 0, elapsed_ms: int = 0, *, provider_error_code: int | None = None, key_slot: int | None = None):
         super().__init__(f"Diffbot {category}" + (f" (HTTP {status})" if status else ""))
         self.category = category
         self.status = status
         self.attempts = attempts
         self.elapsed_ms = elapsed_ms
         self.provider_error_code = provider_error_code
+        self.key_slot = key_slot
 
 
 _last_call = threading.local()
 _semaphore_lock = threading.Lock()
 _semaphore: threading.BoundedSemaphore | None = None
 _semaphore_size = 0
+_token_rotation_lock = threading.Lock()
+_token_rotation_pool: tuple[str, ...] = ()
+_token_rotation_index = 0
 
 
 def _provider_semaphore() -> threading.BoundedSemaphore:
@@ -212,6 +216,35 @@ def load_diffbot_token(token_file: Path | None = None) -> str:
     return ""
 
 
+def load_diffbot_tokens() -> tuple[str, ...]:
+    """Keep legacy primary-key precedence and optionally add one distinct key."""
+    primary = load_diffbot_token()
+    secondary = os.getenv("DIFFBOT_TOKEN_SECONDARY", settings.diffbot_token_secondary).strip()
+    return tuple(dict.fromkeys(token for token in (primary, secondary) if token))
+
+
+def _next_diffbot_token(tokens: tuple[str, ...]) -> str:
+    """Balance real extractions across keys, including separate v2 singletons.
+
+    Rotation is process-local; it does not raise provider plan/account quotas.
+    Explicit ``token=`` callers continue to use only that token.
+    """
+    global _token_rotation_pool, _token_rotation_index
+    if len(tokens) == 1:
+        return tokens[0]
+    identity = tuple(hashlib.sha256(token.encode()).hexdigest() for token in tokens)
+    with _token_rotation_lock:
+        if identity != _token_rotation_pool:
+            _token_rotation_pool, _token_rotation_index = identity, 0
+        token = tokens[_token_rotation_index % len(tokens)]
+        _token_rotation_index = (_token_rotation_index + 1) % len(tokens)
+        return token
+
+
+def _extraction_cache_key(url: str, token: str) -> tuple[str, str]:
+    return url, hashlib.sha256((token + "|image-selection-v2").encode()).hexdigest()
+
+
 def build_article_params(
     url: str,
     token: str,
@@ -256,11 +289,16 @@ def call_diffbot_article(
     *,
     cancel_event: threading.Event | None = None,
     deadline: float | None = None,
+    token_pool: tuple[str, ...] = (),
+    news_id: str | None = None,
 ) -> dict[str, Any]:
     """Stop queued/new attempts on cancellation or deadline.
 
     A request already sent cannot be recalled; its transport timeout still applies.
     ``deadline`` uses the same monotonic clock as the async extraction caller.
+    A 429 may switch to another supplied key even when same-key retries are off.
+    HTTP attempts across all keys share DIFFBOT_MAX_TOTAL_ATTEMPTS. A key that
+    returns 429 is not revisited within a multi-key call.
     """
     import requests
 
@@ -275,13 +313,20 @@ def call_diffbot_article(
         natural_language=natural_language,
     )
     timeout_seconds = max(5, timeout_ms / 1000 + 5)
-    # Total attempts (billing-relevant) are capped regardless of the caller's max_retries.
-    max_attempts = max(1, min(max(0, max_retries) + 1, settings.diffbot_max_total_attempts))
+    tokens = tuple(dict.fromkeys((token, *(key for key in token_pool if key))))
+    key_order = tuple(dict.fromkeys((*token_pool, token)))
+    active_token = token
+    max_retries = max(0, max_retries)
+    # Same-key retries plus at most one visit to each alternate key, under one cap.
+    max_attempts = max(1, min(max_retries + len(tokens), settings.diffbot_max_total_attempts))
+    retries = 0
+    rate_limited: set[str] = set()
     started = time.monotonic()
     _last_call.attempts, _last_call.elapsed_ms = 0, 0
 
     def fail(category: str, status: int | None, attempts: int, provider_error_code: int | None = None) -> DiffbotError:
-        return DiffbotError(category, status, attempts, int((time.monotonic() - started) * 1000), provider_error_code=provider_error_code)
+        slot = key_order.index(active_token) + 1
+        return DiffbotError(category, status, attempts, int((time.monotonic() - started) * 1000), provider_error_code=provider_error_code, key_slot=slot)
 
     attempts = 0
     for attempt in range(max_attempts):
@@ -293,7 +338,7 @@ def call_diffbot_article(
                 attempts += 1
                 response = requests.get(
                     DIFFBOT_ARTICLE_URL,
-                    params=request_params,
+                    params={**request_params, "token": active_token},
                     timeout=request_timeout,
                 )
         except DiffbotError as exc:
@@ -322,13 +367,29 @@ def call_diffbot_article(
             if category in ("rate_limit", "server_error"):
                 retry_after = retry_after_seconds(response.headers.get("Retry-After"))
 
-        if category not in ("rate_limit", "server_error", "timeout", "network") or attempts >= max_attempts:
+        if category == "rate_limit" and len(tokens) > 1:
+            rate_limited.add(active_token)
+            alternate = next((key for key in tokens if key not in rate_limited), None)
+            if alternate is None or attempts >= max_attempts:
+                raise fail(category, status, attempts, provider_error_code)
+            if reason := _interrupted(cancel_event, deadline):
+                raise fail(reason, status, attempts, provider_error_code)
+            logger.warning(
+                "[diffbot] key switch: news_id=%s category=rate_limit http_status=%s provider_error_code=%s from_key_slot=%d to_key_slot=%d attempts=%d",
+                news_id or "-", status, provider_error_code if provider_error_code is not None else "-",
+                key_order.index(active_token) + 1, key_order.index(alternate) + 1, attempts,
+            )
+            active_token = alternate
+            continue
+
+        if category not in ("rate_limit", "server_error", "timeout", "network") or attempts >= max_attempts or retries >= max_retries:
             raise fail(category, status, attempts, provider_error_code)
-        wait = backoff_seconds(attempt, retry_after)
+        wait = backoff_seconds(retries, retry_after)
         if wait is None:
             raise fail(category, status, attempts, provider_error_code)
         if reason := _interrupted(cancel_event, deadline):
             raise fail(reason, status, attempts, provider_error_code)
+        retries += 1
         if deadline is not None and time.monotonic() + wait >= deadline:
             raise fail("deadline", status, attempts, provider_error_code)
         if cancel_event is None:
@@ -404,6 +465,7 @@ def _extract_one_sync(
     *,
     cancel_event: threading.Event | None = None,
     deadline: float | None = None,
+    token_pool: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     url = article.get("naver_url") or article.get("url", "")
     if not url:
@@ -417,6 +479,8 @@ def _extract_one_sync(
         max_retries=max(0, max_retries),
         cancel_event=cancel_event,
         deadline=deadline,
+        token_pool=token_pool,
+        news_id=article.get("news_id"),
     )
     obj = extract_primary_object(payload)
     text = obj.get("text")
@@ -442,17 +506,18 @@ def _extract_one_sync(
     return {**article, **fields} if fields else article
 
 
-def _log_extract_failure(article: dict[str, Any], exc: Exception, started: float) -> None:
+def _log_extract_failure(article: dict[str, Any], exc: Exception, started: float, key_slot: int) -> None:
     """One structured line per failed extraction; only classification fields, never URLs or bodies."""
     if isinstance(exc, DiffbotError):
         category, status, attempts, elapsed_ms = exc.category, exc.status, exc.attempts, exc.elapsed_ms
         provider_error_code = exc.provider_error_code
+        key_slot = exc.key_slot or key_slot
     else:
         category, status, attempts = "unexpected", None, "-"
         provider_error_code = None
         elapsed_ms = int((time.monotonic() - started) * 1000)
     logger.warning(
-        "[diffbot] extract skip: news_id=%s category=%s http_status=%s provider_error_code=%s attempts=%s elapsed_ms=%s error_type=%s",
+        "[diffbot] extract skip: news_id=%s category=%s http_status=%s provider_error_code=%s attempts=%s elapsed_ms=%s error_type=%s key_slot=%s",
         article.get("news_id") or "-",
         category,
         status if status is not None else "-",
@@ -460,6 +525,7 @@ def _log_extract_failure(article: dict[str, Any], exc: Exception, started: float
         attempts,
         elapsed_ms,
         type(exc).__name__,
+        key_slot,
     )
 
 
@@ -472,8 +538,9 @@ async def extract_articles_with_diffbot(
     concurrency: int = 2,
     use_cache: bool = True,
     deadline: float | None = None,
+    raise_errors: bool = False,
 ) -> list[dict[str, Any]]:
-    token = token if token is not None else load_diffbot_token()
+    tokens = ((token,) if token else ()) if token is not None else load_diffbot_tokens()
     if not articles:
         return articles
 
@@ -492,10 +559,19 @@ async def extract_articles_with_diffbot(
                 article = {**article, "naver_categories": labels}
                 if article.get("content_source_url") != naver_url:
                     article = {k: v for k, v in article.items() if k not in _CACHE_FIELDS}
-            if not token or index >= limit:
+            if not tokens or index >= limit:
                 return article
             url = naver_url or article.get("url", "")
-            cache_key = (url, hashlib.sha256((token + "|image-selection-v2").encode()).hexdigest())
+            if use_cache:
+                # A cached body from either configured key avoids another billed call.
+                for configured_token in tokens:
+                    cache_key = _extraction_cache_key(url, configured_token)
+                    cached = _extraction_cache.get(cache_key)
+                    if cached and cached[0] > time.monotonic() and (cached[1].get("cleaned_content") or cached[1].get("thumbnail_url")):
+                        _extraction_cache.move_to_end(cache_key)
+                        return {**article, **deepcopy(cached[1])}
+            selected_token = _next_diffbot_token(tokens)
+            cache_key = _extraction_cache_key(url, selected_token)
             cached = _extraction_cache.get(cache_key)
             if use_cache and cached and cached[0] > time.monotonic():
                 _extraction_cache.move_to_end(cache_key)
@@ -507,19 +583,26 @@ async def extract_articles_with_diffbot(
                 extracted = await asyncio.to_thread(
                     _extract_one_sync,
                     article,
-                    token,
+                    selected_token,
                     timeout_ms,
                     max_retries,
                     cancel_event=cancel_event,
                     deadline=deadline,
+                    token_pool=tokens,
                 )
                 if extracted is not article:
                     fields = {key: extracted[key] for key in _CACHE_FIELDS if key in extracted}
             except asyncio.CancelledError:
                 cancel_event.set()
                 raise
-            except Exception as exc:  # noqa: BLE001
-                _log_extract_failure(article, exc, started)
+            except Exception as exc:
+                if token is not None and isinstance(exc, DiffbotError):
+                    configured = load_diffbot_tokens()
+                    if selected_token in configured:
+                        exc.key_slot = configured.index(selected_token) + 1
+                _log_extract_failure(article, exc, started, tokens.index(selected_token) + 1)
+                if raise_errors:
+                    raise
             finally:
                 cancel_event.set()
             usable = fields.get("thumbnail_url") or fields.get("cleaned_content")
