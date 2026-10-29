@@ -362,6 +362,14 @@ async def _heartbeat(sid: str, job_id: str, token: str, message) -> None:
             return
 
 
+def _raise_if_cancelled() -> None:
+    # Python 3.11 wait_for can return an already completed child while its
+    # caller concurrently receives cancellation. Do not start another HTTP.
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError
+
+
 async def extract_one(article: dict, *, token: str | None = None, deadline: float | None = None,
                       bypass_failure_cache: bool = False, charge_budget: bool = True,
                       attempt_state: dict | None = None) -> tuple[dict | None, dict | None]:
@@ -411,6 +419,7 @@ async def extract_one(article: dict, *, token: str | None = None, deadline: floa
         body_doc, failure_doc = None, {**failure, "code": "EXTRACTION_TIMEOUT", "message": "기사 본문 추출 시간이 초과되었습니다."}
     except Exception:  # noqa: BLE001 — provider failures become per-article evidence failures
         body_doc, failure_doc = None, failure
+    _raise_if_cancelled()
     if failure_doc:
         # Provider-level cause (HTTP status, category, attempts) is logged by econmind.diffbot with the same news_id.
         logger.warning("[v2-body] extract failed: news_id=%s code=%s elapsed_ms=%d", news_id, failure_doc["code"], int((time.monotonic() - started) * 1000))
@@ -437,6 +446,7 @@ async def extract_bodies(sid: str, job_id: str, token: str, news_ids: list[str])
     retry_codes = {"BODY_RATE_LIMITED", "EXTRACTION_TIMEOUT", "EXTRACTION_NETWORK", "EXTRACTION_PROVIDER_ERROR"}
     while pending and time.monotonic() < deadline:
         await _checkpoint(sid, job_id, token)
+        _raise_if_cancelled()
         news_id = pending.popleft()
         if news_id not in articles:
             articles[news_id] = await store.get_news(news_id)
@@ -454,6 +464,7 @@ async def extract_bodies(sid: str, job_id: str, token: str, news_ids: list[str])
                                 attempt_state=attempt_state), remaining)
             except TimeoutError:
                 body, failure = None, {"news_id": news_id, "code": "EXTRACTION_TIMEOUT", "message": "본문 추출 전체 제한 시간을 초과했습니다.", "retryable": True}
+            _raise_if_cancelled()
             charged.add(news_id)
         else:
             body, failure = None, {"news_id": news_id, "code": "ARTICLE_UNAVAILABLE", "message": "기사를 조회할 수 없습니다.", "retryable": False}
