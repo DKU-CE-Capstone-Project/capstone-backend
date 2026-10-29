@@ -499,6 +499,20 @@ async def extract_bodies(sid: str, job_id: str, token: str, news_ids: list[str])
     return list(successes.values()), list(failures.values()), [article for article in articles.values() if article]
 
 
+def report_failure(failure: dict) -> dict:
+    # Queue decisions need provider-specific codes. Stored/public reports use
+    # the existing MongoDB contract, with the concrete cause in the message.
+    messages = {
+        "BODY_RATE_LIMITED": "Diffbot 요청 제한(HTTP 429)으로 기사 본문을 추출하지 못했습니다.",
+        "EXTRACTION_NETWORK": "Diffbot 연결 오류로 기사 본문을 추출하지 못했습니다.",
+        "EXTRACTION_PROVIDER_ERROR": "Diffbot 서버 오류로 기사 본문을 추출하지 못했습니다.",
+        "EXTRACTION_AUTH": "Diffbot 인증 오류로 기사 본문을 추출하지 못했습니다.",
+    }
+    if failure["code"] in messages:
+        return {**failure, "code": "EXTRACTION_FAILED", "message": messages[failure["code"]]}
+    return failure
+
+
 async def _finish(sid: str, job_id: str, token: str, status: str, *, result=None, warnings=None, error=None) -> None:
     async with state.mutex(f"v2:map-mutex:{sid}"), state.mutex(f"v2:job-mutex:{sid}:{job_id}"):
             job = await state.get(_job_key(sid, job_id))
@@ -654,6 +668,7 @@ async def _pipeline(sid: str, job_id: str, token: str) -> None:
         if not successes:
             raise V2Error(422, "NO_USABLE_EVIDENCE", "요청한 기사의 본문을 모두 사용할 수 없어 분석을 생성하지 않았습니다.", True)
         evidence = prepare_evidence(successes)
+        failed = [report_failure(failure) for failure in failed]
         failed.sort(key=lambda e: e["news_id"])
         rag = await rag_evidence(articles, request["news_ids"])
         config = generation()

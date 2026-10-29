@@ -234,6 +234,44 @@ async def test_real_publish_failure_idempotency_and_queued_cancel(local_services
     assert (await state.resource(sid, "map", map_id))["active_report_job_id"] is None
 
 
+@pytest.mark.parametrize(("category", "status", "message"), [
+    ("rate_limit", 429, "HTTP 429"), ("network", None, "연결 오류"),
+    ("server_error", 503, "서버 오류"), ("auth", 401, "인증 오류"),
+])
+async def test_partial_provider_failure_persists_under_existing_mongo_validator(local_services, monkeypatch, category, status, message):
+    db, _sessions, _calls = local_services
+    sid, map_id, news_id = await fixture_map(local_services)
+    cached, failure = await reports.extract_one(await store.get_news(news_id))
+    assert cached and failure is None
+    failed_id = "fixturefailed"
+    await database.save_news(database.news_doc_from_article({"news_id": failed_id, "title": "Failed fixture",
+        "url": "https://fixture.invalid/failed", "source": "fixture", "description": "failed"}))
+    current = await state.resource(sid, "map", map_id)
+    current["nodes"].append({"news_id": failed_id})
+    await state.put(state.key(sid, "map", map_id), current, settings.session_ttl_seconds)
+    original = reports.diffbot_client.extract_articles_with_diffbot
+    async def partial(articles, **kwargs):
+        if articles[0]["news_id"] == failed_id:
+            raise reports.diffbot_client.DiffbotError(category, status, attempts=1)
+        return await original(articles, **kwargs)
+    monkeypatch.setattr(reports.diffbot_client, "extract_articles_with_diffbot", partial)
+    # Cached success has no gap. The failed provider attempt then leaves less
+    # than one gap, ending the batch without a timing race on another attempt.
+    monkeypatch.setattr(settings, "v2_body_batch_timeout_seconds", 0.5)
+    monkeypatch.setattr(settings, "v2_body_request_interval_seconds", 1)
+    body = api.ReportJobCreate(map_id=map_id, expected_revision=current["revision"], client_request_id=uuid.uuid4(), news_ids=[news_id, failed_id])
+    admitted = await submit(sid, map_id, news_id, body=body)
+    await consume_once()
+    completed = await reports.get_job(sid, admitted["job_id"])
+    assert completed["status"] == "completed", completed.get("error")
+    assert completed["warnings"] == ["PARTIAL_EVIDENCE"]
+    saved = await db.reports.find_one({"report_id": completed["result"]["report_id"]})
+    assert saved["coverage"] == {"requested_count": 2, "used_count": 1, "failed_count": 1}
+    assert saved["failed_evidence"][0]["code"] == "EXTRACTION_FAILED"
+    assert message in saved["failed_evidence"][0]["message"]
+    assert saved["reuse_eligible"] is False
+
+
 async def test_real_stale_map_and_completion_revision_race(local_services, monkeypatch):
     sid, map_id, news_id = await fixture_map(local_services)
     admitted = await submit(sid, map_id, news_id)
