@@ -36,6 +36,7 @@ def offline_settings(monkeypatch):
         "diffbot_token_secondary": "",
         "v2_body_request_interval_seconds": 0,
         "use_mongodb": False,
+        "nats_required": False,
         "mongodb_required": False,
         "session_store_required": False,
         "paid_demo_enabled": True,
