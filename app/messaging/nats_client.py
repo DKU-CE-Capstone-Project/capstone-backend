@@ -10,6 +10,7 @@ from __future__ import annotations
 import nats
 
 from app.config import settings
+from app.telemetry import current_request_id
 
 # 스트림/주제/durable consumer 이름 — KEDA ScaledObject와 반드시 일치해야 함
 STREAM_NAME = "analysis"
@@ -34,7 +35,7 @@ async def ensure_stream(js) -> None:
     """analysis 스트림을 멱등하게 생성한다 (이미 있으면 무시)."""
     try:
         await js.add_stream(name=STREAM_NAME, subjects=[SUBJECT])
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 — preserve concurrent stream creation behavior
         # 이미 존재하거나 동시 생성 — 무시
         pass
 
@@ -52,4 +53,7 @@ async def get_jetstream():
 async def publish_job(payload: bytes) -> None:
     """분석 job을 JetStream에 발행한다."""
     js = await get_jetstream()
-    await js.publish(SUBJECT, payload)
+    if request_id := current_request_id():
+        await js.publish(SUBJECT, payload, headers={"EconMind-Request-Id": request_id})
+    else:
+        await js.publish(SUBJECT, payload)

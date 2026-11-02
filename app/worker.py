@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 
 from app.agents.orchestrator import run_analysis
 from app.config import settings
 from app.job_store import PUBLIC_JOB_ERROR, set_job
 from app.messaging.nats_client import DURABLE, SUBJECT, connect, ensure_stream
+from app.telemetry import usage_context
 
 
 async def _process(job: dict) -> None:
@@ -55,19 +57,21 @@ async def main() -> None:
     while True:
         try:
             msgs = await sub.fetch(1, timeout=5)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 — existing queue retry behavior
             # fetch timeout — 큐가 비어 있음, 계속 폴링
             continue
         for msg in msgs:
             try:
                 job = json.loads(msg.data.decode())
-                await _process(job)
+                with usage_context(request_id=(msg.headers or {}).get("EconMind-Request-Id"),
+                                   job_id=job.get("job_id"), run_id=uuid.uuid4().hex, stage="analysis_v1"):
+                    await _process(job)
                 await msg.ack()
             except Exception as exc:  # noqa: BLE001
                 print(f"[worker] message handling error type={type(exc).__name__}")
                 try:
                     await msg.nak()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 — best-effort NAK
                     pass
 
 

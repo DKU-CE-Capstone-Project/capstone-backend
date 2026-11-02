@@ -15,6 +15,7 @@ import httpx
 
 from app.agents.article_embeddings import clean_text
 from app.config import settings
+from app.telemetry import emit, observe
 
 ENDPOINT = "https://api.openai.com/v1/decisions"
 MODEL = "gpt-6-luna"
@@ -136,6 +137,7 @@ class DecisionClient:
                     if cached and time.monotonic() - cached[0] < settings.news_map_decision_cache_ttl_seconds:
                         _cache.move_to_end(digest)
                         self.stats["decision_cache_hits"] += 1
+                        emit("cache_hit", provider="openai", model=MODEL, operation="decision")
                         return deepcopy(cached[1])
                     async with self.semaphore:
                         for attempt in range(3):
@@ -143,8 +145,10 @@ class DecisionClient:
                                 raise DecisionUnavailable("Decision call budget exhausted")
                             self.stats["decision_attempts"] += 1
                             try:
-                                response = await self.http.post(ENDPOINT, json=payload,
-                                                                headers={"Authorization": f"Bearer {key}"})
+                                with observe("openai", "decision", model=MODEL, kind="http_attempt", attempt=attempt + 1) as event:
+                                    response = await self.http.post(ENDPOINT, json=payload,
+                                                                    headers={"Authorization": f"Bearer {key}"})
+                                    event.response(response, usage=_response_usage(response))
                             except httpx.TransportError:
                                 response = None
                             if response is not None and response.status_code == 200:
@@ -173,3 +177,11 @@ class DecisionClient:
                 loop_locks.pop(digest)
             else:
                 loop_locks[digest] = current_lock, users - 1
+
+
+def _response_usage(response):
+    try:
+        body = response.json()
+        return body.get("usage") if isinstance(body, dict) else None
+    except ValueError:
+        return None

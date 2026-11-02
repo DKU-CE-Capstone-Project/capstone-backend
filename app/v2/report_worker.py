@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from contextlib import suppress
 from dataclasses import replace
 from weakref import WeakKeyDictionary
@@ -12,6 +13,7 @@ from nats.js.errors import NotFoundError
 
 from app.config import settings
 from app.messaging.nats_client import connect
+from app.telemetry import current_request_id, usage_context
 from app.v2 import persistence
 from app.v2.errors import V2Error
 from app.v2.reports import process_job
@@ -87,7 +89,10 @@ async def publish(sid: str, map_id: str, job_id: str) -> None:
     """Return only after the server acknowledged durable admission."""
     try:
         js = await get_jetstream()
-        await js.publish(SUBJECT, json.dumps({"job_id": job_id, "session_id": sid, "map_id": map_id, "job_type": "report_v2"}).encode(), headers={"Nats-Msg-Id": job_id})
+        headers = {"Nats-Msg-Id": job_id}
+        if request_id := current_request_id():
+            headers["EconMind-Request-Id"] = request_id
+        await js.publish(SUBJECT, json.dumps({"job_id": job_id, "session_id": sid, "map_id": map_id, "job_type": "report_v2"}).encode(), headers=headers)
     except Exception as exc:
         raise V2Error(503, "DEPENDENCY_UNAVAILABLE", "분석 작업 큐를 사용할 수 없습니다. 같은 요청으로 다시 시도해 주세요.", True) from exc
 
@@ -105,7 +110,9 @@ async def consume_message(message) -> None:
             await message.term()
             return
         while True:
-            status = await process_job(payload["session_id"], payload["job_id"], message)
+            with usage_context(request_id=(getattr(message, "headers", None) or {}).get("EconMind-Request-Id"),
+                               job_id=payload["job_id"], run_id=uuid.uuid4().hex, stage="report_v2"):
+                status = await process_job(payload["session_id"], payload["job_id"], message)
             if status != "busy":
                 await message.ack()
                 return

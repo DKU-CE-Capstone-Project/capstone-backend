@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from app.agents.llm import generate
+from app.telemetry import stage
 
 _PROMPT = (
     "아래 뉴스 요약들을 보고, 사용자가 함께 검색하면 유용할 관련 키워드를 "
@@ -94,6 +95,7 @@ def _fallback_keywords(articles: list[dict[str, Any]], skip: str = "") -> list[s
     return result
 
 
+@stage("keyword_expansion")
 async def expand_keywords(keyword: str, articles: list[dict[str, Any]]) -> list[str]:
     summaries = "\n".join(f"- {a.get('summary', '')}" for a in articles if a.get("summary"))
     if not summaries:

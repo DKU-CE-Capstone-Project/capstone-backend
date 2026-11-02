@@ -1,3 +1,5 @@
+import asyncio
+import hmac
 import logging
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -14,6 +16,7 @@ from app.api.v2 import report_jobs as v2_reports
 from app.config import settings
 from app.database import DatabasePersistenceError
 from app.session import SESSION_COOKIE, SessionExpired, SessionStoreUnavailable, resolve
+from app.telemetry import UsageMiddleware
 from app.v2.errors import V2Error
 
 # News-map diagnostics are aggregate counts only; uvicorn does not configure app loggers.
@@ -109,6 +112,23 @@ async def readiness():
                         content={"status": "ok" if ready else "error",
                                  "mongodb": "on" if connected else "unavailable",
                                  "redis": "on" if redis_ready else "unavailable"})
+
+
+@app.get("/internal/admin/status", include_in_schema=False)
+async def admin_connection_status(request: Request):
+    token = settings.admin_status_token.get_secret_value()
+    supplied = request.headers.get("authorization", "")
+    if len(token) < 32 or not hmac.compare_digest(supplied.encode(), ("Bearer " + token).encode()):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    from app import database
+    connected = False
+    if settings.use_mongodb:
+        try:
+            connected = await asyncio.wait_for(database.ping(), timeout=5)
+        except Exception:  # noqa: BLE001 — report only connectivity, never provider details
+            connected = False
+    return JSONResponse({"mongodb": "connected" if connected else "unreachable" if settings.use_mongodb else "disabled"},
+                        headers={"Cache-Control": "no-store"})
 
 # ── 세션 쿠키 발급 ─────────────────────────────────────────────────────────────
 # 로그인을 넣지 않기로 했으므로(12주차 회의) 계정 대신 쿠키로 사용자를 구분한다.
@@ -230,3 +250,6 @@ async def health() -> dict[str, str]:
     from app import database
 
     return {"status": "ok", "mongodb": "on" if database.enabled() else "off"}
+
+
+app.add_middleware(UsageMiddleware)

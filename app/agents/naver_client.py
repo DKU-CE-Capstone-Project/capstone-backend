@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.config import settings
+from app.telemetry import observe
 
 NAVER_NEWS_URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
 
@@ -132,10 +133,12 @@ async def fetch_naver_page(
     }
     try:
         async with httpx.AsyncClient(timeout=settings.naver_timeout_seconds) as client:
-            response = await asyncio.wait_for(
-                client.get(NAVER_NEWS_URL, params=params, headers=headers),
-                timeout=settings.naver_timeout_seconds,
-            )
+            with observe("naver", "news_search", kind="http_attempt") as event:
+                response = await asyncio.wait_for(
+                    client.get(NAVER_NEWS_URL, params=params, headers=headers),
+                    timeout=settings.naver_timeout_seconds,
+                )
+                event.response(response)
     except (TimeoutError, httpx.TimeoutException) as exc:
         raise NaverNewsError(
             "네이버 뉴스 검색 응답 시간이 초과되었습니다.", 504

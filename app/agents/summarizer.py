@@ -7,6 +7,7 @@ from typing import Any
 from app import store
 from app.agents.llm import generate
 from app.config import settings
+from app.telemetry import stage
 
 # 영문 뉴스를 한국어 제목 + 한국어 한 줄 요약으로 변환 (JSON 출력)
 _PROMPT = (
@@ -32,6 +33,7 @@ def _extract_json(raw: str) -> dict[str, Any] | None:
         return None
 
 
+@stage("summary")
 async def _summarize_one(article: dict[str, Any]) -> dict[str, Any]:
     title = article.get("title") or ""
     description = article.get("description") or ""

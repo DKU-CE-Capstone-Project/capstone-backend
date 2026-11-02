@@ -17,6 +17,7 @@ from app.schemas import (
     RecommendedKeyword,
     RecommendedKeywordsResponse,
 )
+from app.telemetry import emit
 from app.usage_limits import check_quota, client_key
 
 router = APIRouter()
@@ -93,6 +94,7 @@ async def get_keyword_map(
             expires_at, payload = cached
             if expires_at > now:
                 _map_cache.move_to_end(cache_key)
+                emit("cache_hit", provider="application", operation="keyword_map")
                 return payload
             _map_cache.pop(cache_key, None)
 

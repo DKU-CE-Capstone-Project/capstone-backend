@@ -23,6 +23,7 @@ from app.agents import (
     report_generator,
 )
 from app.config import settings
+from app.telemetry import emit, stage
 from app.usage_limits import check_quota
 from app.v2 import persistence, provider_budget, state
 from app.v2.errors import V2Error
@@ -148,6 +149,7 @@ def prepare_evidence(successes: list[tuple[dict, dict]]) -> list[dict]:
     return evidence
 
 
+@stage("rag")
 async def rag_evidence(articles: list[dict], requested: list[str]) -> list[dict]:
     if not settings.use_rag:
         return []
@@ -174,6 +176,7 @@ def report_key(requested: list[str], evidence: list[dict], failed: list[dict], r
     return digest({"requested_news_ids": sorted(requested), "used_evidence": snapshots, "failed_evidence": [{"news_id": e["news_id"], "code": e["code"]} for e in sorted(failed, key=lambda e: e["news_id"])], "rag_evidence": rag, "generation": config})
 
 
+@stage("analysis")
 async def analyze(evidence: list[dict], rag: list[dict]) -> dict:
     # Articles are supplied as data. Metadata and actual excerpts are the same
     # snapshots recorded in MongoDB; failed selections cannot enter this input.
@@ -187,6 +190,7 @@ async def analyze(evidence: list[dict], rag: list[dict]) -> dict:
     return output
 
 
+@stage("critic")
 async def verify(report: dict, evidence: list[dict], rag: list[dict]) -> dict:
     if not settings.use_critic:
         return {"status": "unavailable", "notes": ["검증 기능이 비활성화되어 있습니다."]}
@@ -202,6 +206,7 @@ async def verify(report: dict, evidence: list[dict], rag: list[dict]) -> dict:
     return {"status": "warning" if warning else "passed", "notes": notes}
 
 
+@stage("strategy")
 async def generate_strategy(report: dict, *, risk_level: str, period: str) -> dict:
     # The legacy prompt forces 3–5 securities and includes a sample ticker and
     # fabricated return. V2 instead carries the report's actual asset scope.
@@ -370,6 +375,7 @@ def _raise_if_cancelled() -> None:
         raise asyncio.CancelledError
 
 
+@stage("body")
 async def extract_one(article: dict, *, token: str | None = None, deadline: float | None = None,
                       bypass_failure_cache: bool = False, charge_budget: bool = True,
                       attempt_state: dict | None = None) -> tuple[dict | None, dict | None]:
@@ -384,6 +390,7 @@ async def extract_one(article: dict, *, token: str | None = None, deadline: floa
         return None, {**failure, **cached_failure, "news_id": news_id}
     cached = await persistence.body(news_id, source_url, EXTRACTOR_VERSION)
     if cached:
+        emit("cache_hit", provider="diffbot", operation="article")
         return cached, None
     if charge_budget:
         await provider_budget.reserve("body")
@@ -678,6 +685,8 @@ async def _pipeline(sid: str, job_id: str, token: str) -> None:
         async with state.mutex(f"v2:generation-lock:report:{cache_key}") as lock:
             await _checkpoint(sid, job_id, token)
             report = await persistence.reusable_report(cache_key)
+            if report:
+                emit("cache_hit", provider="application", operation="report_v2")
             if report:
                 report_reused = True
             else:
