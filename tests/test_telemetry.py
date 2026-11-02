@@ -236,3 +236,19 @@ def test_api_request_records_template_not_query_or_cookie(capsys):
     rows = events(capsys)
     assert len(rows) == 1 and rows[0]["kind"] == "api_request"
     assert "secret" not in json.dumps(rows) and "private-cookie" not in json.dumps(rows)
+
+
+@pytest.mark.parametrize(
+    "path, template",
+    [
+        ("/api/v1/keywords/recommended", "/api/v1/keywords/recommended"),
+        ("/api/v1/news/private-news-id/relations", "/api/v1/news/{news_id}/relations"),
+    ],
+)
+def test_api_template_includes_router_prefix_and_omits_parameter_values(
+    capsys, path, template
+):
+    TestClient(app).get(path + "?private=query")
+    rows = events(capsys)
+    assert len(rows) == 1 and rows[0]["route"] == template
+    assert "private" not in json.dumps(rows)

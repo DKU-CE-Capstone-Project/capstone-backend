@@ -184,7 +184,12 @@ class UsageMiddleware:
             try:
                 await self.app(scope, receive, capture)
             finally:
-                route = getattr(scope.get("route"), "path", "unmatched")
+                # New FastAPI versions retain the original relative route in
+                # scope["route"]; the effective context includes router prefixes.
+                effective = scope.get("fastapi", {}).get("effective_route_context")
+                route = getattr(effective, "path_format", None) or getattr(
+                    scope.get("route"), "path_format", "unmatched"
+                )
                 emit(
                     "api_request",
                     route=route,
