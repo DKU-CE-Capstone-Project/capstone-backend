@@ -33,6 +33,10 @@ async def ensure_stream(js) -> None:
                                                           max_age=settings.v2_job_ttl_seconds, duplicate_window=min(120, settings.v2_job_ttl_seconds)))
         except Exception:  # noqa: BLE001 — a concurrent stream creation must verify the actual config
             info = await js.stream_info(STREAM)
+    validate_stream(info)
+
+
+def validate_stream(info) -> None:
     if info.config.subjects != [SUBJECT]:
         raise ValueError("V2 reports stream has conflicting subjects")
     if info.config.retention != RetentionPolicy.WORK_QUEUE or not 0 < info.config.max_age <= settings.v2_job_ttl_seconds:

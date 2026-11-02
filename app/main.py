@@ -101,17 +101,17 @@ async def readiness():
 
     redis_ready = not settings.session_store_required or await session_store.ping()
 
-    if not settings.use_mongodb:
-        ready = not settings.mongodb_required and redis_ready
-        return JSONResponse(status_code=200 if ready else 503,
-                            content={"status": "ok" if ready else "error", "mongodb": "off",
-                                     "redis": "on" if redis_ready else "unavailable"})
-    connected = await database.ping()
-    ready = connected and redis_ready
+    from app.v2 import queue_health
+
+    nats_ready = not settings.nats_required or await queue_health.ping()
+    connected = await database.ping() if settings.use_mongodb else False
+    mongo_ready = connected if settings.use_mongodb else not settings.mongodb_required
+    ready = mongo_ready and redis_ready and nats_ready
     return JSONResponse(status_code=200 if ready else 503,
                         content={"status": "ok" if ready else "error",
-                                 "mongodb": "on" if connected else "unavailable",
-                                 "redis": "on" if redis_ready else "unavailable"})
+                                 "mongodb": ("on" if connected else "unavailable") if settings.use_mongodb else "off",
+                                 "redis": "on" if redis_ready else "unavailable",
+                                 "nats": ("on" if nats_ready else "unavailable") if settings.nats_required else "off"})
 
 
 @app.get("/internal/admin/status", include_in_schema=False)

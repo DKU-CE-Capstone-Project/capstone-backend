@@ -67,6 +67,7 @@ class Settings(BaseSettings):
 
     # ── 클라우드/이벤트 인프라 (CNCF 재구성) ─────────────────────────────
     nats_url: str = "nats://localhost:4222"
+    nats_required: bool = False
     redis_url: str = "redis://localhost:6379/0"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     # PAID is a demo query option until real server-side entitlement exists.
