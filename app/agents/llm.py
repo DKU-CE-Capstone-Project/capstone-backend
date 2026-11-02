@@ -5,6 +5,7 @@ from typing import Any
 from weakref import WeakKeyDictionary
 
 from app.config import settings
+from app.embedding_usage import record_embedding_usage
 from app.telemetry import observe
 
 _loop_clients: WeakKeyDictionary[asyncio.AbstractEventLoop, tuple[str, Any]] = WeakKeyDictionary()
@@ -128,10 +129,7 @@ async def embed(
     task_type: str | None = None,
 ) -> list[float]:
     try:
-        return await asyncio.wait_for(
-            _embed(text, model=model, dimensions=dimensions, task_type=task_type),
-            settings.embedding_timeout_seconds,
-        )
+        return await _embed(text, model=model, dimensions=dimensions, task_type=task_type)
     except TimeoutError:
         return []
 
@@ -153,12 +151,18 @@ async def _embed(
         from google.genai import types as gtypes
 
         with observe("gemini", "embed", model=model or settings.embedding_model) as usage_event:
-            resp = await client.aio.models.embed_content(
-                model=model or settings.embedding_model,
-                contents=text[:8000],
-                config=gtypes.EmbedContentConfig(output_dimensionality=dimensions, task_type=task_type),
+            resp = await asyncio.wait_for(
+                client.aio.models.embed_content(
+                    model=model or settings.embedding_model,
+                    contents=text[:8000],
+                    config=gtypes.EmbedContentConfig(output_dimensionality=dimensions, task_type=task_type),
+                ),
+                settings.embedding_timeout_seconds,
             )
-            usage_event.response(resp, usage=getattr(resp, "metadata", None))
+            await record_embedding_usage(
+                usage_event, resp, client=client,
+                model=model or settings.embedding_model, texts=[text[:8000]],
+            )
         # google-genai: resp.embeddings[0].values
         embs = getattr(resp, "embeddings", None)
         if embs:
@@ -210,7 +214,10 @@ async def embed_batch(
                     ),
                     settings.embedding_timeout_seconds,
                 )
-                usage_event.response(resp, usage=getattr(resp, "metadata", None))
+                await record_embedding_usage(
+                    usage_event, resp, client=client,
+                    model=model or settings.embedding_model, texts=chunk,
+                )
             embs = getattr(resp, "embeddings", None)
             if not embs or len(embs) != len(chunk):
                 return []
