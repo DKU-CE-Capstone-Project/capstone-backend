@@ -13,6 +13,7 @@ from weakref import WeakKeyDictionary
 
 import httpx
 
+from app import usage_events
 from app.agents.article_embeddings import clean_text
 from app.config import settings
 
@@ -136,12 +137,15 @@ class DecisionClient:
                     if cached and time.monotonic() - cached[0] < settings.news_map_decision_cache_ttl_seconds:
                         _cache.move_to_end(digest)
                         self.stats["decision_cache_hits"] += 1
+                        usage_events.emit("decision", "pair", started=time.monotonic(), status="cache_hit",
+                                          model=MODEL, calls=0)
                         return deepcopy(cached[1])
                     async with self.semaphore:
                         for attempt in range(3):
                             if self.stats["decision_attempts"] >= settings.news_map_decision_max_calls:
                                 raise DecisionUnavailable("Decision call budget exhausted")
                             self.stats["decision_attempts"] += 1
+                            started = time.monotonic()
                             try:
                                 response = await self.http.post(ENDPOINT, json=payload,
                                                                 headers={"Authorization": f"Bearer {key}"})
@@ -152,7 +156,11 @@ class DecisionClient:
                                     body = response.json()
                                     answers = normalize(body, questions)
                                 except (ValueError, TypeError, KeyError):
+                                    usage_events.emit("decision", "pair", started=started, status="invalid_response",
+                                                      model=MODEL)
                                     raise DecisionUnavailable("Invalid Decision response") from None
+                                usage_events.emit("decision", "pair", started=started, status="ok", model=MODEL,
+                                                  tokens_in=body["usage"]["input_tokens"])
                                 self.stats["decision_calls"] += 1
                                 self.stats["decision_input_tokens"] += body["usage"]["input_tokens"]
                                 _cache[digest] = time.monotonic(), deepcopy(answers)
@@ -160,6 +168,8 @@ class DecisionClient:
                                 while len(_cache) > 1024:
                                     _cache.popitem(last=False)
                                 return answers
+                            usage_events.emit("decision", "pair", started=started, model=MODEL,
+                                              status="network" if response is None else f"http_{response.status_code}")
                             if response is not None and response.status_code not in (429, 500, 502, 503, 504):
                                 raise DecisionUnavailable(f"Decision provider HTTP {response.status_code}")
                             if attempt < 2:

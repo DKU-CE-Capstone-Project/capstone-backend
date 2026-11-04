@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import UTC
 from email.utils import parsedate_to_datetime
@@ -12,6 +13,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app import usage_events
 from app.config import settings
 
 NAVER_NEWS_URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
@@ -130,6 +132,7 @@ async def fetch_naver_page(
         "sort": "date" if sort == "latest" else "sim",
         "format": "json",
     }
+    started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=settings.naver_timeout_seconds) as client:
             response = await asyncio.wait_for(
@@ -137,11 +140,15 @@ async def fetch_naver_page(
                 timeout=settings.naver_timeout_seconds,
             )
     except (TimeoutError, httpx.TimeoutException) as exc:
+        usage_events.emit("naver", "search", started=started, status="timeout")
         raise NaverNewsError(
             "네이버 뉴스 검색 응답 시간이 초과되었습니다.", 504
         ) from exc
     except httpx.HTTPError as exc:
+        usage_events.emit("naver", "search", started=started, status="network")
         raise NaverNewsError("네이버 뉴스 검색에 연결하지 못했습니다.") from exc
+    usage_events.emit("naver", "search", started=started,
+                      status="ok" if response.status_code < 400 else f"http_{response.status_code}")
     # Never expose response/request bodies or credentials in client-facing errors.
     if response.status_code in (401, 403):
         raise NaverNewsError(

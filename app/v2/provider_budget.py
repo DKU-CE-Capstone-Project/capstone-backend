@@ -70,6 +70,11 @@ def job_budget(job_id: str):
         _job_id.reset(token)
 
 
+def current_job_id() -> str | None:
+    """Read-only view of the bound job identity, for usage events and traces."""
+    return _job_id.get()
+
+
 def _job_key(job_id: str) -> str:
     # Internal IDs need no plaintext representation in an aggregate ledger.
     return _JOB_PREFIX + hashlib.sha256(job_id.encode()).hexdigest()
