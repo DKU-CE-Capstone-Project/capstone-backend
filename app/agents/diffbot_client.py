@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
+from app import usage_events
 from app.agents import naver_categories
 from app.config import settings
 
@@ -336,6 +337,7 @@ def call_diffbot_article(
             with _provider_slot(cancel_event, deadline):
                 request_timeout = timeout_seconds if deadline is None else min(timeout_seconds, max(0.001, deadline - time.monotonic()))
                 attempts += 1
+                attempt_started = time.monotonic()
                 response = requests.get(
                     DIFFBOT_ARTICLE_URL,
                     params={**request_params, "token": active_token},
@@ -345,10 +347,18 @@ def call_diffbot_article(
             raise fail(exc.category, None, attempts) from None
         except requests.Timeout:
             category, status = "timeout", None
+            usage_events.emit("diffbot", "body", started=attempt_started, status="timeout",
+                              key_slot=key_order.index(active_token) + 1)
         except requests.RequestException:
             category, status = "network", None
+            usage_events.emit("diffbot", "body", started=attempt_started, status="network",
+                              key_slot=key_order.index(active_token) + 1)
         else:
             status = response.status_code
+            # One event per billable HTTP attempt, including key switches and retries.
+            usage_events.emit("diffbot", "body", started=attempt_started,
+                              status="ok" if status < 400 else f"http_{status}",
+                              key_slot=key_order.index(active_token) + 1)
             if status < 400:
                 try:
                     payload = response.json()
