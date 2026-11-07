@@ -202,6 +202,77 @@ async def test_strategy_failure_preserves_report_and_retry_generates_only_strate
     assert second["result"]["strategy_id"] and len(pipeline["analyze"]) == 1
 
 
+async def test_invalid_strategy_output_retries_once_with_a_separate_budget_reservation(pipeline, monkeypatch):
+    sid, map_id, ids = await fixture_map()
+    original_generate = reports.generate_strategy
+    original_reserve = reports.provider_budget.reserve
+    attempts = []
+    reservations = []
+
+    async def invalid_once(report, **options):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise reports.InvalidStrategyOutput("unknown_target")
+        return await original_generate(report, **options)
+
+    async def reserve(operation, units=1):
+        reservations.append(operation)
+        return await original_reserve(operation, units)
+
+    monkeypatch.setattr(reports, "generate_strategy", invalid_once)
+    monkeypatch.setattr(reports.provider_budget, "reserve", reserve)
+    job = await finish(sid, await submit(sid, map_id, ids))
+    assert job["status"] == "completed" and job["warnings"] == []
+    assert job["result"]["strategy_id"]
+    assert len(attempts) == 2 and reservations.count("strategy") == 2
+
+
+async def test_invalid_strategy_output_is_bounded_and_keeps_report(pipeline, monkeypatch, caplog):
+    sid, map_id, ids = await fixture_map()
+    attempts = []
+
+    async def invalid(*args, **kwargs):
+        attempts.append(1)
+        raise reports.InvalidStrategyOutput("invalid_schema")
+
+    monkeypatch.setattr(reports, "generate_strategy", invalid)
+    job = await finish(sid, await submit(sid, map_id, ids))
+    assert job["status"] == "completed" and job["warnings"] == ["STRATEGY_GENERATION_FAILED"]
+    assert job["result"]["report_id"] and job["result"]["strategy_id"] is None
+    assert len(attempts) == 2
+    assert "category=invalid_schema" in caplog.text
+
+
+async def test_strategy_retry_respects_job_budget(pipeline, monkeypatch):
+    sid, map_id, ids = await fixture_map()
+    monkeypatch.setattr(settings, "v2_provider_job_budget_units", 3)
+    attempts = []
+
+    async def invalid(*args, **kwargs):
+        attempts.append(1)
+        raise reports.InvalidStrategyOutput("invalid_schema")
+
+    monkeypatch.setattr(reports, "generate_strategy", invalid)
+    job = await finish(sid, await submit(sid, map_id, ids))
+    assert job["status"] == "failed"
+    assert job["error"]["code"] == "JOB_BUDGET_EXCEEDED"
+    assert job["result"]["report_id"] and job["result"]["strategy_id"] is None
+    assert len(attempts) == 1
+
+
+async def test_strategy_failure_logs_exception_type_without_private_details(pipeline, monkeypatch, caplog):
+    sid, map_id, ids = await fixture_map()
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("private-provider-output-and-credential")
+
+    monkeypatch.setattr(reports, "generate_strategy", fail)
+    job = await finish(sid, await submit(sid, map_id, ids))
+    assert job["warnings"] == ["STRATEGY_GENERATION_FAILED"]
+    assert "error_type=RuntimeError" in caplog.text
+    assert "private-provider-output-and-credential" not in caplog.text
+
+
 async def test_idempotent_publish_failure_retry_and_conflicting_input(pipeline, monkeypatch):
     sid, map_id, ids = await fixture_map()
     calls = []
@@ -508,33 +579,40 @@ async def test_report_storage_rejects_missing_body_reference_or_changed_excerpt(
         await persistence.save_report(modified)
 
 
-@pytest.mark.parametrize("stock_name,ticker,accepted", [
-    ("외화 자산", None, True),
-    ("외화 자산", "USDKRW", False),
-    ("새로운 ETF", None, False),
-    ("관련 없는 종목", "005930", False),
-])
-async def test_strategy_uses_only_report_assets_and_cannot_invent_tickers(monkeypatch, stock_name, ticker, accepted):
+async def test_strategy_resolves_identity_from_report_not_model_text(monkeypatch):
     report = {
         "event_summary": "환율 하락", "event_analysis": "분할 대응", "market_impact": "변동성",
-        "stock_impacts": [{"name": "외화 자산", "ticker": None, "impact": "환율 변동", "direction": "mixed", "evidence_news_ids": ["selected"]}],
+        "stock_impacts": [{"name": "테슬라 및 스페이스X 관련주", "ticker": None, "impact": "환율 변동", "direction": "mixed", "evidence_news_ids": ["selected"]}],
         "risk_factors": ["평가 손실"], "verification": {"status": "warning", "notes": ["추가 확인 필요"]},
     }
     prompts = []
     async def generate(prompt):
         prompts.append(prompt)
-        return json.dumps({"strategy_summary": "분할 대응 참고", "risk_warning": "성과를 보장하지 않습니다.", "strategy_items": [{"stock_name": stock_name, "ticker": ticker, "action": "watch", "reason": "추가 확인"}]})
+        return json.dumps({"strategy_summary": "분할 대응 참고", "risk_warning": "성과를 보장하지 않습니다.", "strategy_items": [{"target_index": 0, "stock_name": "테슬ラ 및 스페이스X 관련주", "ticker": "INVENTED", "action": "watch", "reason": "추가 확인"}]})
     monkeypatch.setattr(reports.llm, "generate", generate)
-    if accepted:
-        output = await reports.generate_strategy(report, risk_level="low", period="long")
-        assert output["strategy_items"][0]["ticker"] is None
-    else:
-        with pytest.raises(ValueError, match="asset absent"):
-            await reports.generate_strategy(report, risk_level="low", period="long")
+    output = await reports.generate_strategy(report, risk_level="low", period="long")
+    assert output["strategy_items"] == [{"stock_name": "테슬라 및 스페이스X 관련주", "ticker": None, "action": "watch", "reason": "추가 확인"}]
     data = json.loads(prompts[0].rsplit("\n", 1)[-1])
-    assert data["report"] == report
+    assert data["report"]["stock_impacts"] == [{**report["stock_impacts"][0], "target_index": 0}]
     assert data["risk_level"] == "low" and data["period"] == "long"
     assert "expected_return" not in prompts[0]
+
+
+@pytest.mark.parametrize("items,category", [
+    ([{"target_index": 1, "action": "watch", "reason": "추가 확인"}], "unknown_target"),
+    ([{"target_index": -1, "action": "watch", "reason": "추가 확인"}], "invalid_schema"),
+    ([{"target_index": "0", "action": "watch", "reason": "추가 확인"}], "invalid_schema"),
+    ([{"target_index": True, "action": "watch", "reason": "추가 확인"}], "invalid_schema"),
+    ([{"stock_name": "외화 자산", "ticker": None, "action": "watch", "reason": "추가 확인"}], "invalid_schema"),
+    ([{"target_index": 0, "action": "watch", "reason": "첫째"}, {"target_index": 0, "action": "watch", "reason": "둘째"}], "duplicate_target"),
+])
+async def test_strategy_rejects_unknown_or_ambiguous_target_indexes(monkeypatch, items, category):
+    report = {"event_summary": "사건", "event_analysis": "분석", "market_impact": "영향", "stock_impacts": [{"name": "외화 자산", "ticker": None, "impact": "변동", "direction": "mixed", "evidence_news_ids": ["selected"]}], "risk_factors": [], "verification": {"status": "passed", "notes": []}}
+    async def generate(prompt):
+        return json.dumps({"strategy_summary": "관망", "risk_warning": "보장 없음", "strategy_items": items})
+    monkeypatch.setattr(reports.llm, "generate", generate)
+    with pytest.raises(reports.InvalidStrategyOutput, match=category):
+        await reports.generate_strategy(report, risk_level="medium", period="short")
 
 
 async def test_strategy_without_report_assets_can_abstain(monkeypatch):
