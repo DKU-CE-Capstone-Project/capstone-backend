@@ -43,15 +43,6 @@ class Settings(BaseSettings):
     llm_max_output_tokens: int = Field(default=2048, ge=512, le=8192)
     embedding_timeout_seconds: float = Field(default=30, gt=0, le=120)
 
-    # ── 공급자 사용량 이벤트 (관리자 사용량 컨테이너가 econmind.usage 로그를 읽음) ──
-    # 기본 off. 단가 0은 "모름"이며 est_cost_usd=null로 기록한다.
-    # 단가를 넣을 때는 출처 URL과 확인 날짜를 .env 주석에 함께 남긴다.
-    usage_events_enabled: bool = False
-    usage_price_gemini_input_per_mtok: float = Field(default=0.0, ge=0)
-    usage_price_gemini_output_per_mtok: float = Field(default=0.0, ge=0)
-    usage_price_diffbot_per_call: float = Field(default=0.0, ge=0)
-    usage_price_decision_per_call: float = Field(default=0.0, ge=0)
-
     # ── LLM 제공자 (텍스트 생성) ─────────────────────────────────────────
     # auto를 명시하면 Claude 우선, 실패 시 Gemini. 기본값은 Gemini 고정.
     # 임베딩은 Claude에 API가 없으므로 항상 Gemini 사용(google_api_key 유지).
