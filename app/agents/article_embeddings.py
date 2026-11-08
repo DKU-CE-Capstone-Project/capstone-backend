@@ -16,6 +16,7 @@ from weakref import WeakKeyDictionary
 from app import database
 from app.agents import llm
 from app.config import settings
+from app.telemetry import emit
 
 MAP_VERSION = "news-map-text-v1"
 _cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -108,6 +109,7 @@ async def article_vector(article: dict[str, Any], purpose: str = "news_map", *, 
     task = loop_tasks.get(key)
     if task is not None:
         _count(usage, "embedding_reused")
+        emit("cache_hit", provider="gemini", model=metadata["model"], operation="embed")
     else:
         async def resolve() -> dict[str, Any]:
             record = _record(article, purpose)
@@ -117,6 +119,7 @@ async def article_vector(article: dict[str, Any], purpose: str = "news_map", *, 
                 record = await database.get_news_embedding(article.get("news_id", ""), purpose)
             if _matches(record, metadata):
                 _count(usage, "embedding_reused")
+                emit("cache_hit", provider="gemini", model=metadata["model"], operation="embed")
             else:
                 _count(usage, "embedding_calls")
                 try:

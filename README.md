@@ -1,7 +1,32 @@
 # EconMind Backend
 
 실시간 경제 뉴스 검색·키워드맵·뉴스맵·AI 리포트 API. FastAPI / Python 3.11 이상.
-프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 구현 범위는 아래 2026-10-25 초기 키워드 맵 전환과 2026-10-11~19 v2 구현이며, 과거 설명·검증 수치는 각 날짜의 기록이다. 정본 `docs/14-newsmap-v2-implementation.md`와 `docs/99-verification.md`에 네 저장소의 상태와 검증 범위를 함께 기록했다.
+프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 아래 설명과 검증 수치는 각 절의 기준일에 해당한다. 정본 `docs/14-newsmap-v2-implementation.md`와 `docs/99-verification.md`에 저장소별 상태와 검증 범위를 기록한다.
+
+## v2 전략 대상 검증 보완 (2026-11-07)
+
+[PR #34](https://github.com/DKU-CE-Capstone-Project/capstone-backend/pull/34)를 `main` **`e31ebf9`**에 병합했다. 실제 5개 기사 리포트의 전략 재생에서 모델이 종목명을 변형하면 기존 이름·코드 일치 검사로 저장이 실패하는 사례가 재현됐다. 이전 실패의 예외 원문은 남아 있지 않아 그 원인을 확정하지는 못했다.
+
+- 전략 모델은 리포트 `stock_impacts`의 정수 `target_index`를 선택한다. 서버가 원본 리포트에서 이름·코드를 채워 공개 전략 응답에 넣고, 범위 밖·중복 인덱스 및 잘못된 형식은 거부한다. 리포트에 없는 종목이나 코드를 모델이 추가하지 못하게 하는 범위 제한은 유지한다.
+- 빈 응답·JSON/스키마 오류 등 검증 실패는 최대 한 번 재시도하고 각 모델 호출 전에 공급자 예산을 별도로 예약한다. 전략 실패 시 저장된 리포트는 유지하며, 오류 로그에 모델 응답 원문을 남기지 않는다. 전략 프롬프트 캐시 버전은 `strategy-grounded-v4-target-index`다.
+- `main` 기반 PR 코드에서 Ruff 통과, 로컬 pytest **593 passed / 26 skipped**, 격리된 MongoDB·Redis·NATS 및 예산 검사 **33 passed**다. PR과 병합 후 `main`의 Python 3.11 CI도 통과했다. 같은 수정이 적용된 기존 로컬 작업 브랜치에서 실제 5개 기사 리포트 1건을 이용한 Gemini 전략 직접 생성 3회와 리포트 재사용 후 화면 표시를 확인했다.
+
+실제 생성 확인은 동일 리포트 1건의 소표본이다. 이번 작업에서 GCP 배포는 수행하지 않았다. WP9·WP11 화면과 전체 검증 범위는 [정본 문서 PR #28](https://github.com/DKU-CE-Capstone-Project/econmind-docs/pull/28)에 기록했다. 아래 최초 v2 기록의 `strategy-grounded-v3`와 모델이 작성한 이름·코드 비교 설명은 당시 구현이다.
+
+## 임베딩 비용 계측 (2026-11-02)
+
+응답 사용량·벡터별 token statistics를 우선 사용하고, 없는 경우 동일 `gemini-embedding-001`의
+무료 `countTokens`로 이미 전송한 입력을 계수한다. SDK가 붙이는 user-role 토큰을 제외한
+Content를 사용하며, 2,040토큰 초과 묶음은 나눠서 개별 입력의 잘림 가능성을 확인한다.
+계수는 전체 2초·동시 4개·최대 31요청·재시도 없음으로 제한하며 실패해도 임베딩 벡터는 반환한다.
+기존 임베딩 요청 제한 시간에 선택적 계수 시간이 최대 2초 추가될 수 있다. 계수 토큰은
+`counted_input_tokens`로 응답의 `input_tokens`와 구분하고, 원문·키는 로그에 남기지 않는다.
+잘림 가능·계수 실패·과거 미계측 호출은 미산정이다. 계수값은 입력 기준 비용 추정용이며
+내부 토큰 등을 포함한 최종 청구량과 같음을 보장하지 않는다.
+
+공식 근거: [토큰 계수 API](https://ai.google.dev/api/tokens),
+[계수 비용](https://ai.google.dev/gemini-api/docs/billing#is-gettokens-billed),
+[입력 제한과 잘림 안내](https://discuss.ai.google.dev/t/gemini-embedding-001-counttokens-support-token-correspondence-and-truncation-behaviour/190649).
 
 ## 초기 키워드 맵 실데이터 전환 (2026-10-25)
 

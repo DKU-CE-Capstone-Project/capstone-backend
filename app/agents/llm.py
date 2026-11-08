@@ -8,6 +8,8 @@ from weakref import WeakKeyDictionary
 
 from app import usage_events
 from app.config import settings
+from app.embedding_usage import record_embedding_usage
+from app.telemetry import observe
 
 _loop_clients: WeakKeyDictionary[asyncio.AbstractEventLoop, tuple[str, Any]] = WeakKeyDictionary()
 # Call-scoped labels for usage events; set by generate(), read by provider calls.
@@ -114,28 +116,30 @@ async def _generate_claude(prompt: str) -> str:
         # opus/sonnet 4.x는 temperature/top_p 미지원(400) — 전달하지 않음.
         # cache_control: 동일 프롬프트가 5분 내 반복되면 프리픽스 캐싱(프롬프트가 최소 길이 이상일 때).
         # 실질 비용 절감은 app-level 결과 캐싱(summary_cache/report_index)이 담당.
-        resp = await client.messages.create(
-            model=settings.claude_model,
-            max_tokens=1024,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt,
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ],
-                }
-            ],
-        )
+        with observe("anthropic", "generate", model=settings.claude_model) as usage_event:
+            resp = await client.messages.create(
+                model=settings.claude_model,
+                max_tokens=1024,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt,
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    }
+                ],
+            )
+            usage_event.response(resp, usage=getattr(resp, "usage", None))
         usage = getattr(resp, "usage", None)
         _record_usage("claude", started=started, status="ok", model=settings.claude_model,
                       tokens_in=_token_count(usage, "input_tokens"), tokens_out=_token_count(usage, "output_tokens"))
         return "".join(b.text for b in resp.content if b.type == "text").strip()
     except Exception as e:  # noqa: BLE001
-        print(f"[llm] Claude error (fallback): {type(e).__name__}: {e}")
+        print(f"[llm] Claude error (fallback): {type(e).__name__}")
         _record_usage("claude", started=started, status="error", model=settings.claude_model)
         return ""
 
@@ -156,22 +160,24 @@ async def _generate_gemini(prompt: str, *, max_output_tokens: int | None = None)
             return ""
         from google.genai import types as gtypes
 
-        resp = await client.aio.models.generate_content(
-            model=_model_name(),
-            contents=prompt,
-            config=gtypes.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=_output_limit(max_output_tokens),
-                service_tier=settings.gemini_service_tier,
-                http_options=gtypes.HttpOptions(
-                    timeout=int(settings.gemini_timeout_seconds * 1000),
-                    retry_options=gtypes.HttpRetryOptions(
-                        attempts=3, initial_delay=1, max_delay=8, exp_base=2,
-                        http_status_codes=[429, 503],
+        with observe("gemini", "generate", model=_model_name(), service_tier=settings.gemini_service_tier) as usage_event:
+            resp = await client.aio.models.generate_content(
+                model=_model_name(),
+                contents=prompt,
+                config=gtypes.GenerateContentConfig(
+                    temperature=0.3,
+                    max_output_tokens=_output_limit(max_output_tokens),
+                    service_tier=settings.gemini_service_tier,
+                    http_options=gtypes.HttpOptions(
+                        timeout=int(settings.gemini_timeout_seconds * 1000),
+                        retry_options=gtypes.HttpRetryOptions(
+                            attempts=3, initial_delay=1, max_delay=8, exp_base=2,
+                            http_status_codes=[429, 503],
+                        ),
                     ),
                 ),
-            ),
-        )
+            )
+            usage_event.response(resp, usage=getattr(resp, "usage_metadata", None))
         # SDK retries (429/503, up to 3 attempts) are not visible in usage_metadata.
         usage = getattr(resp, "usage_metadata", None)
         _record_usage("gemini", started=started, status="ok", model=_model_name(),
@@ -190,10 +196,7 @@ async def embed(
     task_type: str | None = None,
 ) -> list[float]:
     try:
-        return await asyncio.wait_for(
-            _embed(text, model=model, dimensions=dimensions, task_type=task_type),
-            settings.embedding_timeout_seconds,
-        )
+        return await _embed(text, model=model, dimensions=dimensions, task_type=task_type)
     except TimeoutError:
         return []
 
@@ -214,11 +217,19 @@ async def _embed(
             return []
         from google.genai import types as gtypes
 
-        resp = await client.aio.models.embed_content(
-            model=model or settings.embedding_model,
-            contents=text[:8000],
-            config=gtypes.EmbedContentConfig(output_dimensionality=dimensions, task_type=task_type),
-        )
+        with observe("gemini", "embed", model=model or settings.embedding_model) as usage_event:
+            resp = await asyncio.wait_for(
+                client.aio.models.embed_content(
+                    model=model or settings.embedding_model,
+                    contents=text[:8000],
+                    config=gtypes.EmbedContentConfig(output_dimensionality=dimensions, task_type=task_type),
+                ),
+                settings.embedding_timeout_seconds,
+            )
+            await record_embedding_usage(
+                usage_event, resp, client=client,
+                model=model or settings.embedding_model, texts=[text[:8000]],
+            )
         # google-genai: resp.embeddings[0].values
         embs = getattr(resp, "embeddings", None)
         if embs:
@@ -258,17 +269,22 @@ async def embed_batch(
         step = max(1, min(batch_size, 100))
         for start in range(0, len(cleaned), step):
             chunk = cleaned[start : start + step]
-            resp = await asyncio.wait_for(
-                client.aio.models.embed_content(
-                    model=model or settings.embedding_model,
-                    contents=chunk,
-                    config=gtypes.EmbedContentConfig(
-                        output_dimensionality=dimensions,
-                        task_type=task_type,
+            with observe("gemini", "embed_batch", model=model or settings.embedding_model) as usage_event:
+                resp = await asyncio.wait_for(
+                    client.aio.models.embed_content(
+                        model=model or settings.embedding_model,
+                        contents=chunk,
+                        config=gtypes.EmbedContentConfig(
+                            output_dimensionality=dimensions,
+                            task_type=task_type,
+                        ),
                     ),
-                ),
-                settings.embedding_timeout_seconds,
-            )
+                    settings.embedding_timeout_seconds,
+                )
+                await record_embedding_usage(
+                    usage_event, resp, client=client,
+                    model=model or settings.embedding_model, texts=chunk,
+                )
             embs = getattr(resp, "embeddings", None)
             if not embs or len(embs) != len(chunk):
                 return []

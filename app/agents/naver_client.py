@@ -15,6 +15,7 @@ import httpx
 
 from app import usage_events
 from app.config import settings
+from app.telemetry import observe
 
 NAVER_NEWS_URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
 
@@ -135,10 +136,12 @@ async def fetch_naver_page(
     started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=settings.naver_timeout_seconds) as client:
-            response = await asyncio.wait_for(
-                client.get(NAVER_NEWS_URL, params=params, headers=headers),
-                timeout=settings.naver_timeout_seconds,
-            )
+            with observe("naver", "news_search", kind="http_attempt") as event:
+                response = await asyncio.wait_for(
+                    client.get(NAVER_NEWS_URL, params=params, headers=headers),
+                    timeout=settings.naver_timeout_seconds,
+                )
+                event.response(response)
     except (TimeoutError, httpx.TimeoutException) as exc:
         usage_events.emit("naver", "search", started=started, status="timeout")
         raise NaverNewsError(

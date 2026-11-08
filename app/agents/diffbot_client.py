@@ -26,6 +26,7 @@ from urllib.parse import unquote, urljoin, urlparse
 from app import usage_events
 from app.agents import naver_categories
 from app.config import settings
+from app.telemetry import emit, observe
 
 logger = logging.getLogger("econmind.diffbot")
 
@@ -338,11 +339,21 @@ def call_diffbot_article(
                 request_timeout = timeout_seconds if deadline is None else min(timeout_seconds, max(0.001, deadline - time.monotonic()))
                 attempts += 1
                 attempt_started = time.monotonic()
-                response = requests.get(
-                    DIFFBOT_ARTICLE_URL,
-                    params={**request_params, "token": active_token},
-                    timeout=request_timeout,
-                )
+                with observe("diffbot", "article", kind="http_attempt", attempt=attempts) as event:
+                    response = requests.get(
+                        DIFFBOT_ARTICLE_URL,
+                        params={**request_params, "token": active_token},
+                        timeout=request_timeout,
+                    )
+                    event.response(response)
+                    # Diffbot can return a provider failure with HTTP 200.
+                    if response.status_code < 400:
+                        try:
+                            result = response.json()
+                            if not isinstance(result, dict) or result.get("error") or result.get("errorCode"):
+                                event.fields["outcome"] = "error"
+                        except ValueError:
+                            event.fields["outcome"] = "error"
         except DiffbotError as exc:
             raise fail(exc.category, None, attempts) from None
         except requests.Timeout:
@@ -579,12 +590,14 @@ async def extract_articles_with_diffbot(
                     cached = _extraction_cache.get(cache_key)
                     if cached and cached[0] > time.monotonic() and (cached[1].get("cleaned_content") or cached[1].get("thumbnail_url")):
                         _extraction_cache.move_to_end(cache_key)
+                        emit("cache_hit", provider="diffbot", operation="article")
                         return {**article, **deepcopy(cached[1])}
             selected_token = _next_diffbot_token(tokens)
             cache_key = _extraction_cache_key(url, selected_token)
             cached = _extraction_cache.get(cache_key)
             if use_cache and cached and cached[0] > time.monotonic():
                 _extraction_cache.move_to_end(cache_key)
+                emit("cache_hit", provider="diffbot", operation="article")
                 return {**article, **deepcopy(cached[1])}
             fields = {}
             started = time.monotonic()

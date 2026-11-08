@@ -7,6 +7,7 @@ from typing import Any
 
 from app.agents.llm import embed, generate
 from app.config import settings
+from app.telemetry import stage
 
 _PROMPT = """\
 아래 뉴스를 바탕으로 투자자를 위한 분석 리포트를 한국어로 작성해줘.
@@ -53,6 +54,7 @@ def _extract_json(raw: str) -> dict[str, Any] | None:
         return None
 
 
+@stage("rag")
 async def retrieve_rag_articles(center: dict[str, Any], k: int = 3) -> list[dict[str, Any]]:
     """벡터검색으로 의미적으로 유사한 과거 뉴스 top-k 반환 (RAG 근거).
 
@@ -79,6 +81,7 @@ def _rag_block(rag_articles: list[dict[str, Any]]) -> str:
     return f"유사 과거 뉴스(벡터검색 근거):\n{lines}\n"
 
 
+@stage("analysis")
 async def generate_report(
     center: dict[str, Any],
     related: list[dict[str, Any]],
