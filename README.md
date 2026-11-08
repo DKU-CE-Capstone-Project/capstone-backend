@@ -3,6 +3,20 @@
 실시간 경제 뉴스 검색·키워드맵·뉴스맵·AI 리포트 API. FastAPI / Python 3.11 이상.
 프로젝트 정본은 [econmind-docs](https://github.com/DKU-CE-Capstone-Project/econmind-docs)다. 아래 설명과 검증 수치는 각 절의 기준일에 해당한다. 정본 `docs/14-newsmap-v2-implementation.md`와 `docs/99-verification.md`에 저장소별 상태와 검증 범위를 기록한다.
 
+<a id="newsmap-next-issue-20261108"></a>
+
+## 뉴스맵 v2의 다른 이슈 보기 (2026-11-08)
+
+세션이 소유한 맵에서 본문 없이 `POST /api/v2/maps/{map_id}/next-issue`를 호출하면 같은 검색어의 다음 이슈를 연다. 공개 맵은 확인한 후보의 `next_issue`, 버튼으로 탐색을 시작할 수 있는 `can_find_next_issue`, 앞선 맵을 조회할 `previous_issue_map_id`를 제공한다. 연관 기사 4건을 채운 맵에서도 이슈 전환을 요청할 수 있다. [PR #37](https://github.com/DKU-CE-Capstone-Project/capstone-backend/pull/37)
+
+- 다음 중심은 현재 중심 뒤의 검색 결과에서 다른 이슈로 확인된 첫 후보다. 저장 후보를 먼저 쓰고 필요할 때 같은 검색어의 원시 50번째까지 이어서 검색한다. 새 중심의 연관 기사 평가는 기본 20건부터 시작해 부족하면 다음 묶음을 더하고, 4건을 채운 단계에서 멈춘다. [선정 흐름](app/agents/news_map.py)
+- 새 이슈에는 별도의 `map_id`를 발급한다. 앞선 맵의 기사 선택과 리포트를 각 맵에서 다시 조회할 수 있고, 같은 맵에서 이미 열었던 다음 이슈는 재사용한다. 다른 이슈를 찾지 못하면 탐색 종료를 기록하고 HTTP 200으로 같은 맵을 반환한다. [맵 저장과 조회](app/v2/maps.py)
+- 다음 이슈 POST에는 `news_map` 한도를 적용한다. 새 키워드로 교체할 때 `DELETE /api/v2/maps/{map_id}?include_issues=true`로 같은 검색의 이슈 맵을 정리할 수 있다. [요청 한도 정책](docs/rate-limit-policy.md)
+
+GCP의 API와 두 워커에 `80e5dd0`을 배포했다. 운영 ‘반도체’ 검증에서 4건 맵의 전환은 HTTP 200이었고, 수집 DB에서 같은 이벤트를 확인했다. 관리자에서는 전환 경로 `/api/v2/maps/{map_id}/next-issue`와 NAVER 검색·OpenAI 판단 기록을 확인했다. [정본 배포·모니터링 기록](https://github.com/DKU-CE-Capstone-Project/econmind-docs/blob/main/docs/99-verification.md#newsmap-next-issue-20261108)
+
+배포 기준의 Ruff 검사, 전체 pytest **631 passed·26 skipped**, 격리 서비스 검사 **33 passed**가 통과했다. 로컬에서 전환·후보 없음·세션 격리·4건 도달 시 중단은 `python -m pytest -q tests/test_v2_maps.py`로 확인할 수 있다. [main CI](https://github.com/DKU-CE-Capstone-Project/capstone-backend/actions/runs/42476360344) · [뉴스맵 회귀 테스트](tests/test_v2_maps.py)
+
 ## v2 전략 대상 검증 보완 (2026-11-07)
 
 [PR #34](https://github.com/DKU-CE-Capstone-Project/capstone-backend/pull/34)를 `main` **`e31ebf9`**에 병합했다. 실제 5개 기사 리포트의 전략 재생에서 모델이 종목명을 변형하면 기존 이름·코드 일치 검사로 저장이 실패하는 사례가 재현됐다. 이전 실패의 예외 원문은 남아 있지 않아 그 원인을 확정하지는 못했다.
@@ -63,7 +77,7 @@ NATS의 전송 재시도는 `max_deliver=-1`로 두고 기존 stream 만료(`V2_
 
 - `/api/v2/session`과 `/maps`는 서버 쿠키 세션에 속한다. JSON에는 공개 `session_epoch`만 제공한다. 맵별 검색 후보·다음 검색 위치·이전 표시 기사·트리를 Redis에 저장하고 revision CAS로 늦은 변경을 거부한다. 초기 주변 목표는 4건, 하위 가지는 3건이며 재검색 0건은 기존 가지를 유지한다. 초기화해도 노드 ID를 재사용하지 않는다.
 - 추가 검색은 원래 검색어의 다음 결과만 사용한다. 기본 최초 1~20건으로 목표를 채우지 못하면 21~40건, 여전히 부족하면 41~50건을 요청하고 멈춘다. 제목·키워드를 조합한 검색어 생성은 제거했다. 50번째는 필터 전 원시 검색 위치의 상한이며, 중복·분류 제외로 부족해도 51번째를 검색하지 않는다. 이미 저장된 51번째 이후 후보도 선정하지 않는다. v1/v2와 Decision/embedding 공통 수집 정책이며 관련성·반복 제외·선정 기준은 유지한다.
-- 최초 중심은 허용된 검색 결과의 첫 기사다. 주변이 부족하다고 중심을 자동 교체하지 않는다. 중심 재선정·이슈별 후보 선택·Decision 임계값 조정·본문 입력 보강은 시뮬레이션/검토 후 보류했으며 미적용이다. 초기 4건·하위 3건은 목표이고 보장 개수가 아니다.
+- 최초 중심은 허용된 검색 결과의 첫 기사다. 초기 주변 목표는 4건, 하위 목표는 3건이며 실제로 선정된 결과를 표시한다. 같은 검색어에서 중심을 바꾸는 후속 동작은 [다른 이슈 보기](#newsmap-next-issue-20261108)를 따른다.
 - `NEWS_MAP_SELECTOR=decision`은 기존 main의 Decision 질문·중복 제외·호출/시간 예산·캐시를 그대로 사용한다. 기본 selector는 기존 `embedding`이다. FREE는 분석 기사 1건, PAID 데모는 `PROTOTYPE_TIER=PAID`와 `PAID_DEMO_ENABLED=true`를 모두 명시할 때만 최대 10건이다.
 - `POST /api/v2/report-jobs`는 UUID `Idempotency-Key`와 revision을 검사하고 Redis에서 맵·작업·재시도 키를 함께 접수한다. NATS `reports.generate.v2`의 영속 발행 응답을 받은 뒤 202를 반환한다. GET 작업 조회와 POST 취소를 제공하며, 별도 v2 워커는 본문 추출·리포트·검증·전략 단계마다 세션·취소·소유권을 확인한다.
 - `/api/v2/reports/{id}`와 `/strategies/{id}`는 허용된 세션에서만 조회한다. 실제 추출 본문은 불변 `news_bodies`에 저장하고 v2 결과는 본문 ID·해시·입력 발췌·성공/실패 기사·coverage를 기록한다. 결과 JSON에는 내부 발췌를 반환하지 않는다. 전체 근거·생성 설정·RAG·전략 옵션이 같은 경우에만 MongoDB 결과를 재사용한다. 부분 본문 성공은 완전 성공 캐시에 넣지 않으며 전략 실패 시 완성된 리포트를 유지한다.

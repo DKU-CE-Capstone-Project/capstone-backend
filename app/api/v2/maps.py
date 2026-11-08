@@ -81,9 +81,16 @@ async def reset_map(request: Request, map_id: str, body: maps.Revision):
     return maps.public_map(await maps.reset_map(request.state.session_id, map_id, body.expected_revision))
 
 
+@router.post('/maps/{map_id}/next-issue', response_model=schemas.Map)
+async def next_issue_map(request: Request, map_id: str):
+    await _limit(request, 'news_map')
+    await state.session(request.state.session_id, touch=True)
+    return maps.public_map(await maps.next_issue_map(request.state.session_id, map_id))
+
+
 @router.delete('/maps/{map_id}', status_code=204)
-async def delete_map(request: Request, map_id: str):
-    await maps.delete_map(request.state.session_id, map_id)
+async def delete_map(request: Request, map_id: str, include_issues: bool = False):
+    await maps.delete_map(request.state.session_id, map_id, include_issues=include_issues)
     return Response(status_code=204)
 
 

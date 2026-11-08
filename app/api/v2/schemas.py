@@ -54,6 +54,11 @@ class ResultLink(BaseModel):
     strategy_id: str | None
 
 
+class IssuePreview(BaseModel):
+    news_id: str
+    title: str
+
+
 class Map(BaseModel):
     map_id: str
     revision: int = Field(ge=1)
@@ -69,6 +74,9 @@ class Map(BaseModel):
     active_report_job_id: str | None
     last_result: ResultLink | None
     expires_at: str
+    next_issue: IssuePreview | None = None
+    can_find_next_issue: bool = False
+    previous_issue_map_id: str | None = None
 
 
 class Capabilities(BaseModel):

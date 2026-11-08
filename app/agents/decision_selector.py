@@ -23,8 +23,11 @@ from app.agents.related_selector import (
 
 
 class DecisionNewsMapSelector:
-    def __init__(self, center: dict[str, Any], client: DecisionClient, *, min_relevance: float = 0.0):
+    def __init__(self, center: dict[str, Any], client: DecisionClient, *, min_relevance: float = 0.0,
+                 find_issues: bool = False):
         self.center, self.client, self.threshold = center, client, min_relevance
+        self.find_issues = find_issues
+        self.distinct_issue_ids: set[str] = set()
         self.remaining: list[RankedArticle] = []
         self.selected: list[RankedArticle] = []
         self.center_repeats = self.neighbour_repeats = self.withheld = 0
@@ -64,6 +67,10 @@ class DecisionNewsMapSelector:
                 self.center_repeats += 1
             elif bucket == "excluded":
                 self.unconnected += 1
+                occurrence = answer['occurrence']['probabilities']
+                if (self.find_issues and occurrence['different'] > POLICY['different_occurrence_min']
+                        and article.get('title')):
+                    self.distinct_issue_ids.add(article_id(article))
             elif bucket == "withheld":
                 self.withheld += 1
             else:

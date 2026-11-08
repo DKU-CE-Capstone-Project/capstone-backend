@@ -6,12 +6,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import session as base_session
-from app.agents.naver_client import NaverNewsPage
-from app.agents.news_map import NewsMapResult
+from app.agents import related_selector
+from app.agents.decision_client import DecisionClient, normalize
+from app.agents.decision_policy import PAIR_QUESTIONS
+from app.agents.naver_client import NaverNewsError, NaverNewsPage
+from app.agents.news_map import NewsMapResult, build_news_map
 from app.agents.related_selector import RankedArticle, identity_keys
 from app.config import settings
 from app.main import app
 from app.v2 import maps, state
+from tests.test_decision_news_map import article
+from tests.test_decision_news_map import response as decision_response
 
 
 @pytest.fixture
@@ -28,7 +33,7 @@ def fixture(monkeypatch):
     async def fetch(query, **kwargs):
         return NaverNewsPage(articles=deepcopy(articles), total=len(articles), start=1, end=12)
 
-    async def select(center, *, pool, target, exclude_articles, search_context, expand):
+    async def select(center, *, pool, target, exclude_articles, search_context, expand, find_issues=False):
         excluded = set().union(*(identity_keys(a) for a in [center, *exclude_articles]))
         eligible = [a for a in pool if not identity_keys(a) & excluded]
         chosen = eligible[:target]
@@ -68,6 +73,201 @@ def test_initial_four_and_map_private_fields(fixture):
     assert set(value) == set(maps.PUBLIC_FIELDS)
     assert 'articles' not in value and 'search_context' not in value
     assert value['initial_selection']['returned'] == 4
+    assert value['next_issue'] is None
+    assert value['can_find_next_issue'] is True
+
+
+def issue_search_fixture(monkeypatch, *, related=0, fail_at=None, search_budget=3,
+                         first_related=(), second_related=('second-background',),
+                         second_rank=7, distinct_issues=('second', 'third')):
+    monkeypatch.setattr(settings, 'news_map_selector', 'decision')
+    monkeypatch.setattr(settings, 'news_map_supplement_max_searches', search_budget)
+    monkeypatch.setattr(maps, 'build_news_map', build_news_map)
+    titles = {1: 'first', 2: 'first-copy', 3: 'unclear', 4: 'first-angle-1', 5: 'first-angle-2',
+              second_rank: 'second', 8: 'first-copy-late', 41: 'third', 50: 'second-background', 51: 'outside'}
+    articles = [article(titles.get(rank, f'copy-{rank}'), rank) for rank in range(1, 52)]
+    searched, compared = [], []
+
+    async def fetch(query, *, start, size):
+        searched.append((query, start, size))
+        if start == fail_at:
+            raise NaverNewsError('fixture')
+        items = articles[start - 1:start - 1 + size]
+        return NaverNewsPage(deepcopy(items), len(articles), start, start + len(items) - 1)
+
+    async def ask(self, center, candidate, questions):
+        a, b = center['news_id'], candidate['news_id']
+        compared.append((a, b))
+        if questions is PAIR_QUESTIONS:
+            return normalize(decision_response(questions, redundancy='distinct'), questions)
+        occurrence, contribution, helpfulness = 'same', 'repeat', '0'
+        if a == 'first' and (b in first_related or (b.startswith('first-angle') and related)):
+            contribution, helpfulness = 'detail', '3'
+        elif a == 'first' and b == 'unclear':
+            occurrence, contribution = 'unclear', 'unrelated'
+        elif a == 'second' and b in second_related:
+            occurrence, contribution, helpfulness = 'different', 'background', '3'
+        elif b in distinct_issues or a == 'second':
+            occurrence, contribution = 'different', 'tangential'
+        return normalize(decision_response(questions, occurrence=occurrence, contribution=contribution,
+                                           helpfulness=helpfulness), questions)
+
+    monkeypatch.setattr(maps.news_fetcher, 'fetch_search_page', fetch)
+    monkeypatch.setattr(DecisionClient, 'ask', ask)
+    return searched, compared
+
+
+@pytest.mark.parametrize('second_rank', [7, 48])
+def test_complete_map_can_open_another_issue_without_eager_expansion(fixture, monkeypatch, second_rank):
+    client, _, _, _ = fixture
+    second_related = ('copy-14', 'copy-15', 'copy-16', 'copy-17')
+    searched, compared = issue_search_fixture(
+        monkeypatch, first_related=('copy-10', 'copy-11', 'copy-12', 'copy-13'),
+        second_related=second_related, second_rank=second_rank, distinct_issues=('second',),
+    )
+    first = create(client, '반도체')
+    assert first['initial_selection']['returned'] == 4
+    assert first['can_find_next_issue'] is True
+    assert first['next_issue'] == ({'news_id': 'second', 'title': 'second'} if second_rank == 7 else None)
+    assert searched == [('반도체', 1, 20)]
+    first_comparisons = compared.count(('first', 'first-copy'))
+    assert first_comparisons == 1 and not any(a == 'second' for a, _ in compared)
+
+    path = f"/api/v2/maps/{first['map_id']}"
+    response = client.post(f'{path}/next-issue')
+    assert response.status_code == 200, response.text
+    next_map = response.json()
+    assert next_map['previous_issue_map_id'] == first['map_id']
+    assert next_map['nodes'][0]['news_id'] == 'second'
+    assert {n['news_id'] for n in next_map['nodes'][1:]} == set(second_related)
+    assert sum(a == 'second' for a, _ in compared) == (19 if second_rank == 7 else 20)
+    assert compared.count(('first', 'first-copy')) == first_comparisons
+    assert searched[1:] == ([] if second_rank == 7 else [('반도체', 21, 20), ('반도체', 41, 10)])
+    assert client.get(path).json()['nodes'] == first['nodes']
+
+
+def test_no_other_issue_keeps_the_complete_map_and_its_selection(fixture, monkeypatch):
+    client, _, _, _ = fixture
+    searched, compared = issue_search_fixture(
+        monkeypatch, first_related=('copy-10', 'copy-11', 'copy-12', 'copy-13'), distinct_issues=(),
+    )
+    first = create(client, '반도체')
+    path = f"/api/v2/maps/{first['map_id']}"
+    selected = client.patch(path, json={'expected_revision': 1, 'selected_news_ids': ['first']}).json()
+    response = client.post(f'{path}/next-issue')
+    assert response.status_code == 200, response.text
+    after = response.json()
+    assert after == {**selected, 'revision': selected['revision'] + 1, 'can_find_next_issue': False,
+                     'expires_at': after['expires_at']}
+    assert searched == [('반도체', 1, 20), ('반도체', 21, 20), ('반도체', 41, 10)]
+    assert not any(b == 'outside' for _, b in compared)
+    count = len(compared)
+    assert client.post(f'{path}/next-issue').json()['revision'] == after['revision']
+    assert len(compared) == count
+
+
+@pytest.mark.parametrize('related', [0, 2])
+def test_next_issue_reuses_the_completed_search_only_after_user_action(fixture, monkeypatch, related):
+    client, _, _, _ = fixture
+    searched, compared = issue_search_fixture(monkeypatch, related=related)
+    monkeypatch.setattr(settings, 'v2_max_maps', 2)
+    first = create(client, '반도체')
+    assert first['state'] == 'active'
+    assert first['initial_selection']['returned'] == related
+    assert first['next_issue'] == {'news_id': 'second', 'title': 'second'}
+    assert first['nodes'][0]['news_id'] == 'first'
+    assert len(first['nodes']) == 1 + related
+    assert {a for a, _ in compared if a not in ('first-angle-1', 'first-angle-2')} == {'first'}
+    assert searched == [('반도체', 1, 20), ('반도체', 21, 20), ('반도체', 41, 10)]
+    assert all(b != 'outside' for _, b in compared)
+
+    path = f"/api/v2/maps/{first['map_id']}"
+    assert client.patch(path, json={'expected_revision': 1, 'selected_news_ids': ['first']}).status_code == 200
+    with TestClient(app) as other:
+        other.get('/api/v2/session')
+        assert other.post(f'{path}/next-issue').status_code == 404
+    opened = client.post(f'{path}/next-issue')
+    assert opened.status_code == 200, opened.text
+    second = opened.json()
+    assert second['query'] == first['query']
+    assert second['previous_issue_map_id'] == first['map_id']
+    assert [n['news_id'] for n in second['nodes']] == ['second', 'second-background']
+    assert second['next_issue']['news_id'] == 'third'  # Skip a later repeat of the first issue.
+    assert second['selected_news_ids'] == []
+    assert client.get(path).json()['selected_news_ids'] == ['first']
+    assert len(searched) == 3  # No NAVER re-search, including for the article at position 50.
+
+    second_path = f"/api/v2/maps/{second['map_id']}"
+    assert client.patch(second_path, json={'expected_revision': 1, 'selected_news_ids': ['second']}).status_code == 200
+    compared_count = len(compared)
+    reopened = client.post(f'{path}/next-issue').json()
+    assert reopened['map_id'] == second['map_id'] and reopened['selected_news_ids'] == ['second']
+    assert len(compared) == compared_count
+
+    separate = create(client, '다른 검색')  # Issue views share a search slot.
+    assert client.delete(f'{second_path}?include_issues=true').status_code == 204
+    assert client.get(path).status_code == client.get(second_path).status_code == 410
+    assert client.get(f"/api/v2/maps/{separate['map_id']}").status_code == 200
+
+
+@pytest.mark.parametrize(('second_related', 'expected_evaluated'), [
+    (('copy-10', 'copy-11', 'copy-12', 'copy-13'), 20),
+    (('copy-22', 'copy-23', 'copy-24', 'copy-25'), 40),
+    (('copy-22', 'copy-23', 'copy-24', 'second-background'), 49),
+])
+def test_next_issue_stops_evaluating_after_the_round_that_finds_four(
+    fixture, monkeypatch, second_related, expected_evaluated,
+):
+    client, _, _, _ = fixture
+    searched, compared = issue_search_fixture(monkeypatch, second_related=second_related)
+    first = create(client, '반도체')
+    response = client.post(f"/api/v2/maps/{first['map_id']}/next-issue")
+    assert response.status_code == 200, response.text
+    second = response.json()
+    assert second['initial_selection']['status'] == 'complete'
+    assert {n['news_id'] for n in second['nodes'][1:]} == set(second_related)
+    assert sum(center == 'second' for center, _ in compared) == expected_evaluated
+    assert searched == [('반도체', 1, 20), ('반도체', 21, 20), ('반도체', 41, 10)]
+
+
+@pytest.mark.parametrize(('fail_at', 'budget', 'status'), [(41, 3, 'partial'), (None, 1, 'insufficient')])
+def test_next_issue_is_not_offered_when_the_search_stops_early(fixture, monkeypatch, fail_at, budget, status):
+    client, _, _, _ = fixture
+    issue_search_fixture(monkeypatch, fail_at=fail_at, search_budget=budget)
+    first = create(client)
+    assert first['initial_selection']['status'] == status
+    assert first['next_issue'] is None
+    denied = client.post(f"/api/v2/maps/{first['map_id']}/next-issue")
+    assert denied.status_code == 422
+    assert denied.json()['error']['code'] == 'NEXT_ISSUE_UNAVAILABLE'
+
+
+def test_embedding_mode_can_offer_a_distinct_issue_when_naver_has_fewer_than_fifty(fixture, monkeypatch):
+    client, _, _, _ = fixture
+    monkeypatch.setattr(maps, 'build_news_map', build_news_map)
+    articles = [
+        article('first', 1, title='반도체 신규 생산시설 착공', description='용인 공장 증설'),
+        article('repeat', 2, title='반도체 신규 생산시설 착공', description='용인 공장 증설'),
+        article('second', 3, title='유럽 법원, 칩 설계 특허 침해 첫 심리', description='반도체 설계도 무단 이용 쟁점'),
+    ]
+    searched = []
+
+    async def fetch(query, *, start, size):
+        searched.append((start, size))
+        return NaverNewsPage(deepcopy(articles), len(articles), start, len(articles))
+
+    async def vector(article):
+        return [0.0, 1.0] if article['news_id'] == 'second' else [1.0, 0.0]
+
+    monkeypatch.setattr(maps.news_fetcher, 'fetch_search_page', fetch)
+    monkeypatch.setattr(related_selector, 'article_vector', vector)
+    first = create(client, '반도체')
+    assert first['initial_selection']['returned'] == 0
+    assert first['next_issue']['news_id'] == 'second'
+    second = client.post(f"/api/v2/maps/{first['map_id']}/next-issue").json()
+    assert [node['news_id'] for node in second['nodes']] == ['second']
+    assert second['next_issue'] is None
+    assert searched == [(1, 20)]
 
 
 def test_free_selection_limit_and_revision_conflict(fixture):
