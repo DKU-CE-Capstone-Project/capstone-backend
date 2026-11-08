@@ -17,16 +17,18 @@ from app.agents import news_fetcher
 from app.agents.article_embeddings import EmbeddingUnavailable
 from app.agents.decision_client import DecisionUnavailable
 from app.agents.naver_client import NaverNewsError
-from app.agents.news_map import NewsMapResult, build_news_map
+from app.agents.news_map import NewsMapResult, build_news_map, discover_issue_candidates
 from app.agents.related_selector import article_id
 from app.config import settings
+from app.database import DatabasePersistenceError
 from app.utils import cache_articles
 from app.v2 import state
 from app.v2.errors import V2Error
 
 PUBLIC_FIELDS = ('map_id', 'revision', 'query', 'state', 'root_node_id', 'nodes', 'branches',
                  'initial_selection', 'selected_news_ids', 'detail_news_id', 'report_panel_open',
-                 'active_report_job_id', 'last_result', 'expires_at')
+                 'active_report_job_id', 'last_result', 'expires_at', 'next_issue',
+                 'can_find_next_issue', 'previous_issue_map_id')
 ARTICLE_FIELDS = ('news_id', 'title', 'description', 'source', 'published_at', 'url', 'naver_url',
                   'thumbnail_url', 'keywords', 'categories', '_search_rank', '_search_end',
                   '_search_keyword', '_searched_at')
@@ -85,7 +87,14 @@ def snapshot(article: dict) -> dict:
 
 
 def public_map(value: dict) -> dict:
-    return {k: deepcopy(value.get(k)) for k in PUBLIC_FIELDS}
+    return {**{k: deepcopy(value.get(k)) for k in PUBLIC_FIELDS}, 'can_find_next_issue': _can_find_next_issue(value)}
+
+
+def _can_find_next_issue(value: dict) -> bool:
+    if not value['root_node_id'] or value.get('issue_discovery_finished'):
+        return False
+    status = value['initial_selection']['status']
+    return status == 'complete' or (bool(value.get('previous_issue_map_id')) and status == 'insufficient')
 
 
 def selection(result: NewsMapResult) -> dict:
@@ -128,10 +137,11 @@ def check_revision(value: dict, expected: int) -> None:
                       details={'revision': value['revision']})
 
 
-async def _select(center: dict, pool: list[dict], target: int, excluded: list[dict], context: dict):
+async def _select(center: dict, pool: list[dict], target: int, excluded: list[dict], context: dict,
+                  *, find_issues: bool = False):
     try:
         return await build_news_map(center, target=target, pool=pool, exclude_articles=excluded,
-                                    search_context=context, expand=True)
+                                    search_context=context, expand=True, find_issues=find_issues)
     except (EmbeddingUnavailable, DecisionUnavailable) as exc:
         raise V2Error(503, 'DEPENDENCY_UNAVAILABLE', '연관 기사 판단 서비스를 사용할 수 없습니다.', True) from exc
     except NaverNewsError as exc:
@@ -146,11 +156,68 @@ def _node(value: dict, article: dict, parent: str | None, level: int, batch: int
             'level': level, 'expanded': False, 'batch': batch, 'news': card(article)}
 
 
+def _new_map(query: str, articles: list[dict], context: dict) -> dict:
+    return {'map_id': str(uuid.uuid4()), 'revision': 1, 'query': query,
+            'state': 'active' if articles else 'empty', 'root_node_id': None,
+            'nodes': [], 'branches': [], 'selected_news_ids': [], 'detail_news_id': None,
+            'report_panel_open': False, 'active_report_job_id': None, 'last_result': None,
+            'next_node_seq': 1, 'articles': {}, 'candidate_articles': [snapshot(a) for a in articles],
+            'branch_history': {}, 'search_context': context}
+
+
+async def _populate_initial(value: dict, center: dict, articles: list[dict],
+                            *, eligible_issues: set[str] | None = None) -> None:
+    root = _node(value, center, None, 0)
+    result = await _select(snapshot(center), articles, 4, [], value['search_context'], find_issues=True)
+    children = [_node(value, item.article, root['node_id'], 1) for item in result.items]
+    root['expanded'] = True
+    attempt = selection(result)
+    value.update(root_node_id=root['node_id'], nodes=[root, *children], initial_selection=attempt)
+    value['branches'] = [{'parent_node_id': root['node_id'],
+                          'child_node_ids': [n['node_id'] for n in children],
+                          'display_selection': attempt, 'last_attempt': attempt}]
+    value['branch_history'][root['node_id']] = {
+        'previously_displayed_news_ids': [n['news_id'] for n in children],
+        'previous_articles': [snapshot(item.article) for item in result.items],
+        'search_context': deepcopy(value['search_context'])}
+
+    issues = result.issue_candidates
+    if issues is None:
+        return
+    allowed = issues.distinct_ids if eligible_issues is None else issues.distinct_ids & eligible_issues
+    center_index = next((i for i, a in enumerate(issues.pool) if article_id(a) == root['news_id']), len(issues.pool))
+    alternatives = [a for a in issues.pool[center_index + 1:] if article_id(a) in allowed]
+    # Retain the search snapshot even when the map is full and has no known alternate.
+    value['candidate_articles'] = [snapshot(a) for a in issues.pool]
+    value['issue_news_ids'] = [article_id(a) for a in alternatives]
+    if alternatives:
+        value['next_issue'] = {'news_id': article_id(alternatives[0]), 'title': alternatives[0]['title']}
+
+
+async def _save_new_map(sid: str, value: dict) -> dict:
+    value['initial_snapshot'] = deepcopy({k: value[k] for k in ('root_node_id', 'nodes', 'branches',
+                                                              'initial_selection', 'branch_history')})
+    # The session might have been deleted while selection was awaiting an API.
+    session = await state.session(sid)
+    value['expires_at'] = session['expires_at']
+    await state.put(state.key(sid, 'map', value['map_id']), value, state.epoch(session['expires_at']) - time.time())
+    await state.register_resource(sid, 'map', value['map_id'], session['expires_at'])
+    return value
+
+
+async def _live_maps(sid: str) -> list[dict]:
+    return [value for map_id in await state.keys(sid, 'map')
+            if (value := await state.get(state.key(sid, 'map', map_id))) is not None]
+
+
+def _issue_search_id(value: dict) -> str:
+    return value.get('issue_search_id', value['map_id'])
+
+
 async def create_map(sid: str, query: str) -> dict:
-    session = await state.session(sid, touch=True)
+    await state.session(sid, touch=True)
     async with state.mutex(f"v2:map-create:{sid}"):
-        live = [rid for rid in await state.keys(sid, 'map') if await state.get(state.key(sid, 'map', rid))]
-        if len(live) >= settings.v2_max_maps:
+        if len({_issue_search_id(value) for value in await _live_maps(sid)}) >= settings.v2_max_maps:
             raise V2Error(422, 'SESSION_MAP_LIMIT_REACHED', '열려 있는 탐색이 너무 많습니다.')
         try:
             page = await news_fetcher.fetch_search_page(query, start=1, size=settings.news_map_initial_candidates)
@@ -162,41 +229,75 @@ async def create_map(sid: str, query: str) -> dict:
             raise V2Error(502, 'SEARCH_FAILED', '기사 검색을 완료하지 못했습니다.', True) from exc
         except RuntimeError as exc:
             raise V2Error(503, 'DEPENDENCY_UNAVAILABLE', 'v2 뉴스 공급원이 설정되지 않았습니다.', True) from exc
-        value = {'map_id': str(uuid.uuid4()), 'revision': 1, 'query': query,
-                 'state': 'active' if articles else 'empty', 'root_node_id': None,
-                 'nodes': [], 'branches': [], 'selected_news_ids': [], 'detail_news_id': None,
-                 'report_panel_open': False, 'active_report_job_id': None, 'last_result': None,
-                 'expires_at': session['expires_at'], 'next_node_seq': 1, 'articles': {},
-                 'candidate_articles': [snapshot(a) for a in articles], 'branch_history': {},
-                 'search_context': {'query': query, 'sort': 'relevance', 'observed_at': observed,
-                                    'raw_start': page.start, 'raw_end': page.end,
-                                    'candidate_news_ids': [article_id(a) for a in articles],
-                                    'selector': settings.news_map_selector,
-                                    'next_positions': {query: page.end + 1}}}
+        context = {'query': query, 'sort': 'relevance', 'observed_at': observed,
+                   'raw_start': page.start, 'raw_end': page.end, 'search_exhausted': page.end >= page.total,
+                   'candidate_news_ids': [article_id(a) for a in articles], 'selector': settings.news_map_selector,
+                   'next_positions': {query: page.end + 1}}
+        value = _new_map(query, articles, context)
         if articles:
-            root = _node(value, articles[0], None, 0)
-            result = await _select(snapshot(articles[0]), articles, 4, [], value['search_context'])
-            children = [_node(value, item.article, root['node_id'], 1) for item in result.items]
-            root['expanded'] = True
-            value.update(root_node_id=root['node_id'], nodes=[root, *children], initial_selection=selection(result))
-            value['branches'] = [{'parent_node_id': root['node_id'],
-                                  'child_node_ids': [n['node_id'] for n in children],
-                                  'display_selection': selection(result), 'last_attempt': selection(result)}]
-            value['branch_history'][root['node_id']] = {
-                'previously_displayed_news_ids': [n['news_id'] for n in children],
-                'previous_articles': [snapshot(item.article) for item in result.items],
-                'search_context': deepcopy(value['search_context'])}
+            await _populate_initial(value, articles[0], articles)
         else:
             value['initial_selection'] = _shortage(4, 'no_search_results')
-        value['initial_snapshot'] = deepcopy({k: value[k] for k in ('root_node_id', 'nodes', 'branches',
-                                                                  'initial_selection', 'branch_history')})
-        # A session might have been deleted while search was awaiting an API.
-        session = await state.session(sid)
-        value['expires_at'] = session['expires_at']
-        await state.put(state.key(sid, 'map', value['map_id']), value,
-                        state.epoch(session['expires_at']) - time.time())
-        await state.register_resource(sid, 'map', value['map_id'], value['expires_at'])
-        return value
+        return await _save_new_map(sid, value)
+
+
+def _issue_centers(current: dict, live: dict[str, dict]) -> list[dict]:
+    centers = []
+    while current:
+        root = next(n for n in current['nodes'] if n['node_id'] == current['root_node_id'])
+        centers.append(current['articles'][root['news_id']])
+        current = live.get(current.get('previous_issue_map_id'))
+    return centers
+
+
+async def next_issue_map(sid: str, map_id: str) -> dict:
+    async with state.mutex(f"v2:map-create:{sid}"):
+        current = await load_map(sid, map_id)
+        next_issue = current.get('next_issue')
+        if current.get('issue_discovery_finished'):
+            return current
+        if next_issue is None and not _can_find_next_issue(current):
+            raise V2Error(422, 'NEXT_ISSUE_UNAVAILABLE', '더 살펴볼 다른 이슈가 없어요.')
+        # A retry (or returning to the earlier map) should reopen the same map
+        # with its selections and reports, without evaluating the center twice.
+        live = {value['map_id']: value for value in await _live_maps(sid)}
+        for value in live.values():
+            if value.get('previous_issue_map_id') == map_id:
+                return await load_map(sid, value['map_id'])
+        articles = current['candidate_articles']
+        query = current['query']
+        context = deepcopy(current['search_context'])
+        allowed = set(current.get('issue_news_ids', ()))
+        if next_issue is not None:
+            center = next(article for article in articles if article_id(article) == next_issue['news_id'])
+        else:
+            centers = _issue_centers(current, live)
+            first_issue = not current.get('previous_issue_map_id')
+            if first_issue and 'issue_news_ids' not in current:
+                # Older complete maps saved only the initial page, even if their cursor advanced.
+                saved_end = context['raw_end']
+                if context['next_positions'][query] > saved_end + 1:
+                    context['next_positions'][query] = saved_end + 1
+                    context['search_exhausted'] = False
+            try:
+                issues = await discover_issue_candidates(
+                    centers, articles, context,
+                    checked_pool=first_issue and 'issue_news_ids' in current,
+                )
+            except (TimeoutError, EmbeddingUnavailable, DecisionUnavailable, DatabasePersistenceError) as exc:
+                raise V2Error(503, 'DEPENDENCY_UNAVAILABLE', '다른 이슈를 확인하지 못했어요. 다시 시도해 주세요.', True) from exc
+            except NaverNewsError as exc:
+                raise V2Error(502, 'SEARCH_FAILED', '기사 검색을 완료하지 못했습니다.', True) from exc
+            if not issues.distinct_ids:
+                current = await load_map(sid, map_id)
+                current['issue_discovery_finished'] = True
+                return await commit_map(sid, current, current['revision'])
+            articles, allowed = issues.pool, issues.distinct_ids
+            center = next(article for article in articles if article_id(article) in allowed)
+        value = _new_map(query, articles, context)
+        value.update(previous_issue_map_id=map_id, issue_search_id=_issue_search_id(current))
+        await _populate_initial(value, center, articles, eligible_issues=allowed)
+        return await _save_new_map(sid, value)
 
 
 async def cancel_detached(sid: str, job_id: str | None) -> None:
@@ -347,10 +448,18 @@ async def reset_map(sid: str, map_id: str, expected: int) -> dict:
     return value
 
 
-async def delete_map(sid: str, map_id: str) -> None:
-    value = await load_map(sid, map_id)
-    await state.tombstone_map(sid, map_id)
-    await cancel_detached(sid, value.get('active_report_job_id'))
+async def delete_map(sid: str, map_id: str, *, include_issues: bool = False) -> None:
+    async with state.mutex(f"v2:map-create:{sid}"):
+        value = await load_map(sid, map_id)
+        removed = [value]
+        if include_issues:
+            search_id = _issue_search_id(value)
+            removed.extend(other for other in await _live_maps(sid)
+                           if other['map_id'] != map_id and _issue_search_id(other) == search_id)
+        for other in removed:
+            await state.tombstone_map(sid, other['map_id'])
+    for other in removed:
+        await cancel_detached(sid, other.get('active_report_job_id'))
 
 
 async def news_card(sid: str, news_id: str) -> dict:

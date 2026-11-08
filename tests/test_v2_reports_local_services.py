@@ -339,7 +339,7 @@ async def test_http_end_to_end_session_map_async_report_and_isolation(local_serv
     async def inspect(articles):
         return articles
 
-    async def select(center, pool, target, excluded, context):
+    async def select(center, pool, target, excluded, context, *, find_issues=False):
         return NewsMapResult(items=[], status="insufficient", reason="no_eligible_related", target=target)
 
     monkeypatch.setattr(maps.news_fetcher, "fetch_search_page", search)

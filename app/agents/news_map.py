@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import chain
@@ -30,6 +32,7 @@ from app.agents.related_selector import (
     RankedArticle,
     article_id,
     identity_keys,
+    unique_candidates,
 )
 from app.config import settings
 from app.database import DatabasePersistenceError
@@ -43,12 +46,19 @@ _MAX_SEARCH_POSITION = 50
 
 
 @dataclass
+class IssueCandidates:
+    pool: list[dict[str, Any]]
+    distinct_ids: set[str]
+
+
+@dataclass
 class NewsMapResult:
     items: list[RankedArticle]
     status: str
     reason: str | None
     target: int
     stats: dict[str, Any] = field(default_factory=dict)
+    issue_candidates: IssueCandidates | None = None
 
 
 def display_target(limit: int, tier: str) -> int:
@@ -120,6 +130,7 @@ class _Expansion:
         self.exhausted = page.end < start + size - 1 or page.end >= page.total
         if self.search_context is not None:
             self.search_context.setdefault("next_positions", {})[query] = page.end + 1
+            self.search_context["search_exhausted"] = self.exhausted
         fresh = [a for a in page.articles if self.selector.is_new(a)]
         self.stats["raw_duplicates"] += len(page.articles) - len(fresh)
         needed = settings.news_map_max_candidates - self.selector.evaluated
@@ -141,13 +152,15 @@ class _Expansion:
         # Map-only cache: grounded rule metadata and map vectors, no Flex or RAG calls.
         return await cache_articles(prepared, news_map_only=True)
 
-    def steps(self, pool: list[dict[str, Any]], consumed: int):
+    def steps(self, pool: list[dict[str, Any]], consumed: int, *, cached_page_size: int | None = None):
         """(name, external, fetch) in order; external fetches happen only when reached."""
         rest = pool[consumed:]
         if rest:
-            async def cached():
-                return rest
-            yield "cached_pool", False, cached
+            size = cached_page_size or len(rest)
+            for offset in range(0, len(rest), size):
+                async def cached(batch=rest[offset:offset + size]):
+                    return batch
+                yield "cached_pool", False, cached
         if not news_fetcher.expansion_supported():
             return
         keyword = ((self.search_context or {}).get('query') if self.search_context is not None
@@ -160,6 +173,8 @@ class _Expansion:
         if not keyword or not latest:
             return
         self.raw_end = latest[0]
+        if self.search_context and self.search_context.get("search_exhausted"):
+            return
         start = self.raw_end + 1
         while start <= _MAX_SEARCH_POSITION:
             size = min(settings.news_map_supplement_page_size, _MAX_SEARCH_POSITION - start + 1)
@@ -173,22 +188,64 @@ class _Expansion:
             start += size
 
 
+@asynccontextmanager
+async def _map_selectors(
+    centers: list[dict[str, Any]], *, min_relevance: float = 0.0, find_issues: bool = False,
+) -> AsyncIterator[list[NewsMapSelector | DecisionNewsMapSelector]]:
+    if settings.news_map_selector == "decision":
+        async with DecisionClient() as client:
+            yield [DecisionNewsMapSelector(center, client, min_relevance=min_relevance, find_issues=find_issues)
+                   for center in centers]
+    else:
+        yield [NewsMapSelector(center, min_relevance=min_relevance, find_issues=find_issues) for center in centers]
+
+
+async def discover_issue_candidates(
+    centers: list[dict[str, Any]], pool: list[dict[str, Any]], search_context: dict[str, Any],
+    *, checked_pool: bool = False,
+) -> IssueCandidates:
+    """Find a later issue on demand, using the same search and the existing selector."""
+    center_id = article_id(centers[0])
+    pool = [a for a in pool if not isinstance(a.get("_search_rank"), int) or a["_search_rank"] <= _MAX_SEARCH_POSITION]
+    consumed = (len(pool) if checked_pool else
+                next((i + 1 for i, a in enumerate(pool) if article_id(a) == center_id), len(pool)))
+    async with _map_selectors(centers, find_issues=True) as selectors:
+        selector, *earlier = selectors
+        selector._seen.update(key for a in pool[:consumed] for key in identity_keys(a))
+        expansion = _Expansion(centers[0], selector, {"raw": 0, "raw_duplicates": 0, "filtered": 0}, search_context)
+        searches = 0
+        steps = expansion.steps(pool, consumed, cached_page_size=settings.news_map_supplement_page_size)
+        async with asyncio.timeout(settings.news_map_decision_total_timeout_seconds):
+            for _, external, fetch in steps:
+                remaining = settings.news_map_max_candidates - selector.evaluated
+                if remaining <= 0 or (external and searches >= settings.news_map_supplement_max_searches):
+                    break
+                batch = await fetch()
+                if external:
+                    searches += 1
+                    pool.extend(batch)
+                await selector.add(batch, limit=remaining)
+                distinct = [a for a in batch if article_id(a) in selector.distinct_issue_ids]
+                for previous in earlier:
+                    if not distinct:
+                        break
+                    await previous.add(distinct)
+                    distinct = [a for a in distinct if article_id(a) in previous.distinct_issue_ids]
+                if distinct:
+                    return IssueCandidates(pool, {article_id(a) for a in distinct})
+    return IssueCandidates(pool, set())
+
+
 async def build_news_map(
     center: dict[str, Any], *, target: int, min_relevance: float = 0.0, expand: bool = True,
     pool: list[dict[str, Any]] | None = None, exclude_articles: list[dict[str, Any]] | None = None,
-    search_context: dict[str, Any] | None = None,
+    search_context: dict[str, Any] | None = None, find_issues: bool = False,
 ) -> NewsMapResult:
     excluded = set().union(*(identity_keys(a) for a in exclude_articles or []))
-    if settings.news_map_selector == "decision":
-        async with DecisionClient() as client:
-            selector = DecisionNewsMapSelector(center, client, min_relevance=min_relevance)
-            selector._seen.update(excluded)
-            return await _build_news_map(center, selector, target=target, expand=expand, pool=pool,
-                                         search_context=search_context)
-    selector = NewsMapSelector(center, min_relevance=min_relevance)
-    selector._seen.update(excluded)
-    return await _build_news_map(center, selector, target=target, expand=expand, pool=pool,
-                                 search_context=search_context)
+    async with _map_selectors([center], min_relevance=min_relevance, find_issues=find_issues) as [selector]:
+        selector._seen.update(excluded)
+        return await _build_news_map(center, selector, target=target, expand=expand, pool=pool,
+                                     search_context=search_context)
 
 
 async def _select(selector: NewsMapSelector | DecisionNewsMapSelector, target: int) -> list[RankedArticle]:
@@ -206,9 +263,18 @@ async def _build_news_map(
     stats: dict[str, Any] = {"pool": 0, "initial": 0, "search_steps": 0, "searches": 0, "search_cache_hits": 0,
                              "raw": 0, "raw_duplicates": 0, "filtered": 0, "rounds": 0}
     usage = track_usage()
+    # Retain this map's own search snapshot, including the center. Global cached
+    # article membership can be overwritten by another search or session.
+    issue_pool = list(pool or []) if selector.find_issues else []
     pool = await cached_pool(center) if pool is None else [a for a in pool if selector.is_new(a)]
     pool = [a for a in pool if not isinstance(a.get("_search_rank"), int)
             or a["_search_rank"] <= _MAX_SEARCH_POSITION]
+    search_exhausted = search_context is not None and search_context.get("search_exhausted", False)
+    cached_page_size = None
+    if selector.find_issues:
+        # A new issue evaluates saved results in stages, even if more raw pages are available.
+        pool = unique_candidates(center, pool)
+        cached_page_size = settings.news_map_supplement_page_size
     stats["pool"] = len(pool)
     # The first round takes the first unique candidates in search order.
     consumed = _initial_end(center, pool, settings.news_map_initial_candidates)
@@ -219,7 +285,7 @@ async def _build_news_map(
     items = await _select(selector, target)
     status, reason = (COMPLETE, None) if len(items) >= target else (INSUFFICIENT, None)
     expansion = _Expansion(center, selector, stats, search_context)
-    steps = expansion.steps(pool, consumed)
+    steps = expansion.steps(pool, consumed, cached_page_size=cached_page_size)
     first_step = next(steps, None)
     if status == INSUFFICIENT and not expand:
         if selector.evaluated < settings.news_map_max_candidates and first_step is not None and (
@@ -240,6 +306,8 @@ async def _build_news_map(
                             break
                         stats["search_steps"] += 1
                     articles = await fetch()
+                    if external and selector.find_issues:
+                        issue_pool.extend(articles)
                     added = await selector.add(articles, limit=settings.news_map_max_candidates - selector.evaluated)
                     stats["rounds"] += 1
                     stats[f"added_{name}"] = stats.get(f"added_{name}", 0) + added
@@ -250,7 +318,7 @@ async def _build_news_map(
                 else:
                     if expansion.raw_end >= _MAX_SEARCH_POSITION:
                         reason = "search_limit"
-                    elif first_step is None:
+                    elif first_step is None and not search_exhausted:
                         reason = "no_source"
         except TimeoutError:
             status, reason = PARTIAL, "timeout"
@@ -277,4 +345,9 @@ async def _build_news_map(
     # Counts and the hashed article ID only: no titles, queries, keys or vectors.
     logger.info("news_map center=%s %s", article_id(center),
                 " ".join(f"{key}={value}" for key, value in stats.items()))
-    return NewsMapResult(items, status, reason, target, stats)
+    issue_candidates = None
+    if selector.find_issues and search_context is not None:
+        exhausted = expansion.raw_end >= _MAX_SEARCH_POSITION or search_context.get("search_exhausted")
+        if status == COMPLETE or (status == INSUFFICIENT and exhausted):
+            issue_candidates = IssueCandidates(issue_pool, selector.distinct_issue_ids)
+    return NewsMapResult(items, status, reason, target, stats, issue_candidates)

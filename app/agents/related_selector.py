@@ -123,9 +123,11 @@ class RankedArticle:
 
 
 class NewsMapSelector:
-    def __init__(self, center: dict[str, Any], *, min_relevance: float = 0.0):
+    def __init__(self, center: dict[str, Any], *, min_relevance: float = 0.0, find_issues: bool = False):
         self.center = center
         self.threshold = max(settings.news_map_min_relevance, min_relevance)
+        self.find_issues = find_issues
+        self.distinct_issue_ids: set[str] = set()
         self.remaining: list[RankedArticle] = []
         self.selected: list[RankedArticle] = []
         self.center_repeats = 0
@@ -180,6 +182,13 @@ class NewsMapSelector:
             self._vectors[article_id(article)] = values
             cosine = cosine_similarity(self._center_vector, values)
             score = self._relevance(article, cosine)
+            item = RankedArticle(article, score, cosine)
+            if self.find_issues and article.get("title"):
+                evidence = self._evidence_of(item)
+                linked = score >= self.threshold and has_issue_connection(
+                    self._center_evidence, evidence, self.center.get("_search_keyword") or "")
+                if not linked and compare(self._center_evidence, evidence, cosine).relation is Relation.DIFFERENT:
+                    self.distinct_issue_ids.add(article_id(article))
             if score < self.threshold:
                 self.below_threshold += 1
                 continue
@@ -189,7 +198,7 @@ class NewsMapSelector:
             if shared and shared <= {word.casefold() for word in ENTITIES}:
                 self.entity_only += 1
                 continue
-            ranked.append(RankedArticle(article, score, cosine))
+            ranked.append(item)
         ranked.sort(key=lambda item: (-item.score, -len(clean_text(item.article.get("description"))),
                                       article_key(item.article)))
         for item in ranked:
