@@ -18,7 +18,8 @@ from app.config import settings
 from app.v2 import state
 from app.v2.errors import V2Error
 
-_OPERATIONS = frozenset({"body", "rag", "analysis", "critic", "strategy"})
+_OPERATIONS = frozenset({"body", "rag", "analysis", "critic", "strategy",
+                         "bull", "bear", "judge", "revise"})
 _DAILY_KEY = "v2:provider-budget:daily"
 _JOB_PREFIX = "v2:provider-budget:job:"
 _KST_OFFSET = 9 * 3600

@@ -136,6 +136,10 @@ class Settings(BaseSettings):
     # Shared v2 report workload credits, not provider invoice currency/HTTP counts.
     v2_provider_daily_budget_units: int = Field(default=1000, ge=1, le=1000000)
     v2_provider_job_budget_units: int = Field(default=32, ge=1, le=1000)
+    # WP0: independent opt-in arms; existing A stays unchanged by default.
+    v2_multi_agent: bool = False
+    v2_claim_check: bool = False
+    v2_revise_max_rounds: int = Field(default=0, ge=0, le=2)
 
     # ── AI 에이전트 (RAG 그라운딩 + 검증) ────────────────────────────────
     embedding_model: str = "gemini-embedding-001"  # Gemini 임베딩 (768차원 요청, generate와 별도 쿼터)

@@ -174,7 +174,7 @@ async def cancel_job(job_id: str, request: Request):
     return reports.public_job(await reports.cancel_job(sid, job_id))
 
 
-@router.get("/reports/{report_id}", response_model=Report)
+@router.get("/reports/{report_id}", response_model=Report, response_model_exclude_unset=True)
 async def get_report(report_id: str, request: Request):
     await state.authorize_result(request.state.session_id, report_id, "report")
     doc = await persistence.report(report_id)
@@ -183,7 +183,7 @@ async def get_report(report_id: str, request: Request):
     return persistence.public_report(doc)
 
 
-@router.get("/strategies/{strategy_id}", response_model=Strategy)
+@router.get("/strategies/{strategy_id}", response_model=Strategy, response_model_exclude_unset=True)
 async def get_strategy(strategy_id: str, request: Request):
     await state.authorize_result(request.state.session_id, strategy_id, "strategy")
     doc = await persistence.strategy(strategy_id)

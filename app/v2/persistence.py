@@ -211,6 +211,9 @@ async def save_strategy(doc: dict) -> tuple[dict, bool]:
 def public_report(doc: dict) -> dict:
     fields = ("schema_version", "report_id", "title", "event_summary", "event_analysis", "market_impact", "stock_impacts", "risk_factors", "requested_news_ids", "used_evidence", "failed_evidence", "coverage", "rag_evidence", "verification", "created_at")
     result = deepcopy({key: doc[key] for key in fields})
+    for key in ("claims", "debate", "agent_trace"):
+        if doc.get(key) is not None:
+            result[key] = deepcopy(doc[key])
     result["created_at"] = iso(result["created_at"])
     for evidence in result["used_evidence"]:
         evidence.pop("input_excerpt", None)
@@ -222,5 +225,7 @@ def public_report(doc: dict) -> dict:
 def public_strategy(doc: dict) -> dict:
     fields = ("schema_version", "strategy_id", "report_id", "risk_level", "period", "strategy_summary", "risk_warning", "strategy_items", "created_at")
     result = deepcopy({key: doc[key] for key in fields})
+    if doc.get("agent_trace") is not None:
+        result["agent_trace"] = deepcopy(doc["agent_trace"])
     result["created_at"] = iso(result["created_at"])
     return result

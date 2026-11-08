@@ -1,5 +1,5 @@
 """Public v2 DTOs. Persistence and worker-only fields stay private."""
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -115,7 +115,8 @@ class ReportJob(BaseModel):
     map_id: str
     accepted_map_revision: int
     status: Literal['queued', 'running', 'cancel_requested', 'completed', 'failed', 'cancelled']
-    stage: Literal['queued', 'extracting', 'analyzing', 'verifying', 'strategy', 'saving', 'done']
+    stage: Literal['queued', 'extracting', 'analyzing', 'verifying', 'strategy', 'saving', 'done',
+                   'debating', 'judging', 'revising']
     request_news_ids: list[str]
     progress: Progress
     result: JobResult | None
@@ -159,6 +160,7 @@ class StockImpact(BaseModel):
     impact: str
     direction: Literal['up', 'down', 'mixed', 'unknown']
     evidence_news_ids: list[str]
+    claim_ids: list[str] = Field(default_factory=list, max_length=3)
 
 
 class Coverage(BaseModel):
@@ -167,9 +169,78 @@ class Coverage(BaseModel):
     failed_count: int
 
 
+class ClaimEvidence(BaseModel):
+    news_id: str
+    sentence: str = Field(min_length=1, max_length=200)
+
+
+class Claim(BaseModel):
+    claim_id: str = Field(pattern=r'^c(?:[1-9]|1[0-2])$')
+    text: str = Field(min_length=1, max_length=200)
+    kind: Literal['fact', 'interpretation']
+    evidence: list[ClaimEvidence] = Field(min_length=1, max_length=3)
+    falsifier: str | None = Field(default=None, max_length=120)
+    verdict: Literal['supported', 'refuted', 'unclear']
+    sentence_found: bool
+    reason: str | None = Field(default=None, max_length=80)
+
+
+class Debate(BaseModel):
+    name: str
+    ticker: str | None
+    bull: list[Annotated[str, Field(max_length=100)]] = Field(max_length=2)
+    bear: list[Annotated[str, Field(max_length=100)]] = Field(max_length=2)
+    direction: Literal['up', 'down', 'mixed', 'unknown']
+    verdict: str = Field(max_length=200)
+    evidence_news_ids: list[str]
+
+
+class AgentTrace(BaseModel):
+    seq: int = Field(ge=1)
+    agent: Literal['analysis', 'bull', 'bear', 'judge', 'critic', 'revise', 'strategy']
+    elapsed_ms: int = Field(ge=0)
+    summary: str = Field(max_length=120)
+    decision: Literal['ok', 'warning', 'revise_requested', 'adopted', 'kept_original', 'failed']
+    tokens_in: int | None = Field(default=None, ge=0)
+    tokens_out: int | None = Field(default=None, ge=0)
+
+
+class ClaimsSummary(BaseModel):
+    total: int = Field(ge=0, le=12)
+    supported: int = Field(ge=0, le=12)
+    refuted: int = Field(ge=0, le=12)
+    unclear: int = Field(ge=0, le=12)
+    sentence_missing: int = Field(ge=0, le=12)
+
+
+class ClaimChange(BaseModel):
+    claim_id: str
+    action: Literal['rewritten', 'removed']
+    before_text: str
+
+
+class RevisionRound(BaseModel):
+    round: int = Field(ge=1, le=2)
+    targets: list[str]
+    before: int = Field(ge=0)
+    after: int | None = Field(ge=0)
+    decision: Literal['adopted', 'kept_original', 'failed']
+    changes: list[ClaimChange] = Field(default_factory=list)
+
+
+class Revision(BaseModel):
+    attempts: int = Field(ge=0, le=2)
+    adopted: bool
+    initial_status: Literal['passed', 'warning', 'unavailable']
+    initial_notes: list[str]
+    rounds: list[RevisionRound] = Field(max_length=2)
+
+
 class Verification(BaseModel):
     status: Literal['passed', 'warning', 'unavailable']
     notes: list[str]
+    claims_summary: ClaimsSummary | None = None
+    revision: Revision | None = None
 
 
 class Report(BaseModel):
@@ -188,6 +259,9 @@ class Report(BaseModel):
     rag_evidence: list[RagEvidence]
     verification: Verification
     created_at: str
+    claims: list[Claim] | None = Field(default=None, max_length=12)
+    debate: list[Debate] | None = Field(default=None, max_length=6)
+    agent_trace: list[AgentTrace] | None = Field(default=None, max_length=128)
 
 
 class StrategyItem(BaseModel):
@@ -207,3 +281,4 @@ class Strategy(BaseModel):
     risk_warning: str
     strategy_items: list[StrategyItem]
     created_at: str
+    agent_trace: list[AgentTrace] | None = Field(default=None, max_length=128)
