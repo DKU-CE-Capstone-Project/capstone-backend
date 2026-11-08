@@ -62,7 +62,7 @@ PAIR_QUESTIONS = {
 USEFUL = ('background', 'consequence', 'perspective', 'detail')
 POLICY = {
     'version': 'decision-repeat-first-v1',
-    'repeat_min': .50, 'same_occurrence_min': .50,
+    'repeat_min': .50, 'same_occurrence_min': .50, 'different_occurrence_min': .50,
     'same_occurrence_strict': .80, 'useful_min': .60, 'help_min': .60, 'offtopic_min': .60,
     'redundant_min': .70, 'role_penalty': .30,
     # Candidate counts, display limits and call budgets come from Settings.
