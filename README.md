@@ -13,6 +13,21 @@
 
 실제 생성 확인은 동일 리포트 1건의 소표본이다. 이번 작업에서 GCP 배포는 수행하지 않았다. WP9·WP11 화면과 전체 검증 범위는 [정본 문서 PR #28](https://github.com/DKU-CE-Capstone-Project/econmind-docs/pull/28)에 기록했다. 아래 최초 v2 기록의 `strategy-grounded-v3`와 모델이 작성한 이름·코드 비교 설명은 당시 구현이다.
 
+## 임베딩 비용 계측 (2026-11-02)
+
+응답 사용량·벡터별 token statistics를 우선 사용하고, 없는 경우 동일 `gemini-embedding-001`의
+무료 `countTokens`로 이미 전송한 입력을 계수한다. SDK가 붙이는 user-role 토큰을 제외한
+Content를 사용하며, 2,040토큰 초과 묶음은 나눠서 개별 입력의 잘림 가능성을 확인한다.
+계수는 전체 2초·동시 4개·최대 31요청·재시도 없음으로 제한하며 실패해도 임베딩 벡터는 반환한다.
+기존 임베딩 요청 제한 시간에 선택적 계수 시간이 최대 2초 추가될 수 있다. 계수 토큰은
+`counted_input_tokens`로 응답의 `input_tokens`와 구분하고, 원문·키는 로그에 남기지 않는다.
+잘림 가능·계수 실패·과거 미계측 호출은 미산정이다. 계수값은 입력 기준 비용 추정용이며
+내부 토큰 등을 포함한 최종 청구량과 같음을 보장하지 않는다.
+
+공식 근거: [토큰 계수 API](https://ai.google.dev/api/tokens),
+[계수 비용](https://ai.google.dev/gemini-api/docs/billing#is-gettokens-billed),
+[입력 제한과 잘림 안내](https://discuss.ai.google.dev/t/gemini-embedding-001-counttokens-support-token-correspondence-and-truncation-behaviour/190649).
+
 ## 초기 키워드 맵 실데이터 전환 (2026-10-25)
 
 기존 고정 mock 키워드 대신, 검색어 관련 실시간 뉴스 제목·요약에서 근거 있는 이슈·개체 노드를 추출하는 **`GET /api/v1/keywords/map?q=...`** 엔드포인트를 구현했다(`feat/keyword-map-gemini` → `main`). 생성형 LLM이나 기사 본문 추출(Diffbot)을 호출하지 않는 **Zero-LLM** 파이프라인이다.

@@ -13,6 +13,7 @@ from typing import Any
 
 from app.agents.llm import generate
 from app.config import settings
+from app.telemetry import stage
 
 _PROMPT = """\
 너는 투자 리포트를 검증하는 사실확인 전문가다.
@@ -62,6 +63,7 @@ def _skipped(reason: str) -> dict[str, Any]:
     }
 
 
+@stage("critic")
 async def verify_report(
     report: dict[str, Any],
     evidence_summaries: list[str],

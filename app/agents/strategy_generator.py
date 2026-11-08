@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from app.agents.llm import generate
+from app.telemetry import stage
 
 _PROMPT = """\
 아래 투자 리포트를 바탕으로 구체적인 투자 전략을 한국어로 작성해줘.
@@ -77,6 +78,7 @@ def _extract_json(raw: str) -> dict[str, Any] | None:
         return None
 
 
+@stage("strategy")
 async def generate_strategy(
     report_summary: str,
     risk_level: str = "medium",

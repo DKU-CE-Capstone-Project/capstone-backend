@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.agents.llm import generate
 from app.config import settings
+from app.telemetry import stage
 
 logger = logging.getLogger(__name__)
 VERSION = "article-metadata-v1"
@@ -216,6 +217,7 @@ def _reusable(result: dict[str, Any], fingerprint: str) -> bool:
     )
 
 
+@stage("metadata")
 async def extract_metadata(article: dict[str, Any], *, allow_llm: bool = True) -> dict[str, Any]:
     """Return validated metadata plus provenance; failures use rules and retry after 60s."""
     title, body, basis = _input(article)

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    admin_status_token: SecretStr = SecretStr("")
     newsapi_key: str = ""
     news_provider: Literal["naver", "gdelt", "newsapi"] = "naver"
     naver_client_id: str = ""

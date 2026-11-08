@@ -35,6 +35,7 @@ from app.agents.repeated_coverage import (
     tokens as rc_tokens,
 )
 from app.config import settings
+from app.telemetry import emit
 from app.utils import make_news_id
 
 
@@ -98,6 +99,7 @@ class GeminiBatchEmbedder:
             cached = _vec_cache.get(k)
             if cached is not None and cached.shape == (self.dimensions,):
                 _vec_cache.move_to_end(k)
+                emit("cache_hit", provider="gemini", model=self.model, operation="embed_vector")
             elif k not in missing_key_to_text:
                 missing_key_to_text[k] = t
                 missing_unique.append(k)
@@ -118,6 +120,7 @@ class GeminiBatchEmbedder:
                 vec = self._normalize_vec(raw, self.dimensions)
                 _vec_cache[k] = vec
                 _vec_cache.move_to_end(k)
+                emit("cache_hit", provider="gemini", model=self.model, operation="embed_vector")
                 while len(_vec_cache) > _MAX_VEC_CACHE:
                     _vec_cache.popitem(last=False)
 
