@@ -8,14 +8,15 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, ValidationError
 
-from app.telemetry import usage_context
+from app.telemetry import emit, usage_context
 
-BULL_PROMPT_VERSION = "debate-bull-v1"
-BEAR_PROMPT_VERSION = "debate-bear-v1"
+BULL_PROMPT_VERSION = "debate-bull-v2"
+BEAR_PROMPT_VERSION = "debate-bear-v2"
 JUDGE_PROMPT_VERSION = "debate-judge-v1"
 MAX_STOCKS = 6
+MAX_ARGUMENTS_PER_TARGET = 2
 MAX_CLAIMS = 12
 _CLAIM_ID = re.compile(r"c(?:[1-9]|1[0-2])\Z")
 Generator = Callable[..., Awaitable[str]]
@@ -48,7 +49,8 @@ class _Argument(_Output):
 
 
 class _Side(_Output):
-    arguments: list[_Argument] = Field(min_length=1, max_length=12)
+    # Enforce the count after trimming each target to its first two arguments.
+    arguments: list[_Argument] = Field(min_length=1)
 
 
 class _Claim(_Output):
@@ -62,8 +64,8 @@ class _Claim(_Output):
 class _Debate(_Output):
     name: StrictStr = Field(min_length=1)
     ticker: StrictStr | None
-    bull: list[StrictStr] = Field(default_factory=list, max_length=2)
-    bear: list[StrictStr] = Field(default_factory=list, max_length=2)
+    bull: list[StrictStr] = Field(default_factory=list, max_length=MAX_ARGUMENTS_PER_TARGET)
+    bear: list[StrictStr] = Field(default_factory=list, max_length=MAX_ARGUMENTS_PER_TARGET)
     direction: Literal["up", "down", "mixed", "unknown"]
     verdict: StrictStr = Field(max_length=200)
     evidence_news_ids: list[StrictStr] = Field(max_length=10)
@@ -80,7 +82,7 @@ def _parse(raw: str) -> dict:
     except (TypeError, ValueError):
         raise DebateOutputError("invalid_json") from None
     if not isinstance(result, dict):
-        raise DebateOutputError("invalid_schema")
+        raise DebateOutputError("json_not_object")
     return result
 
 
@@ -187,20 +189,43 @@ async def _analyst(side: str, evidence: list[dict], rag: list[dict], generate: G
         except BaseException:
             _record(side, "failed", "분석 실행을 완료하지 못했습니다.", started)
             raise
+        issues = []
         try:
-            arguments = _Side.model_validate(_parse(raw)).model_dump()["arguments"]
+            candidates = _Side.model_validate(_parse(raw)).model_dump()["arguments"]
             counts = {}
-            for item in arguments:
+            arguments = []
+            for item in candidates:
                 target = (item["name"], item["ticker"])
-                counts[target] = counts.get(target, 0) + 1
+                count = counts.get(target, 0)
+                if count < MAX_ARGUMENTS_PER_TARGET:
+                    counts[target] = count + 1
+                    arguments.append(item)
+            if len(counts) > MAX_STOCKS:
+                raise DebateOutputError("too_many_targets")
+            for item in arguments:
                 item["sentence_found"] = _sentence_found(item["evidence"], evidence)
-            if len(counts) > MAX_STOCKS or any(count > 2 for count in counts.values()):
-                raise DebateOutputError("too_many_arguments")
-        except (TypeError, ValueError):
-            _record(side, "failed", "분석 응답 형식을 확인하지 못했습니다.", started)
-            return None
-    _record(side, "ok", f"논거 {len(arguments)}건을 생성했습니다.", started)
-    return arguments
+        except ValidationError as error:
+            failure = "invalid_argument_schema"
+            # Error messages and context can include response values. Keep only paths and codes.
+            issues = [
+                {"path": issue["loc"], "type": issue["type"]}
+                for issue in error.errors(include_input=False, include_context=False, include_url=False)[:8]
+            ]
+        except DebateOutputError as error:
+            failure = str(error)
+        except (TypeError, ValueError) as error:
+            failure = type(error).__name__
+        else:
+            discarded = len(candidates) - len(arguments)
+            if discarded:
+                emit("agent_output_normalized", provider="application", operation="debate_analyst",
+                     outcome="success", discarded_arguments=discarded)
+            _record(side, "ok", f"논거 {len(arguments)}건을 생성했습니다.", started)
+            return arguments
+        emit("agent_output_validation", provider="application", operation="debate_analyst",
+             outcome="error", error_type=failure, validation_issues=issues)
+        _record(side, "failed", "분석 응답 형식을 확인하지 못했습니다.", started)
+        return None
 
 
 def _judge_prompt(evidence: list[dict], rag: list[dict], bull, bear, claims_enabled: bool) -> str:
@@ -245,7 +270,9 @@ def _debate_rows(raw, report: dict, *, bull_available: bool, bear_available: boo
                          and (row.get("name"), row.get("ticker")) == (stock["name"], stock["ticker"])), {})
         def arguments(side, available, row=matching):
             values = row.get(side, []) if available else []
-            return [value[:100] for value in values[:2] if isinstance(value, str)] if isinstance(values, list) else []
+            if not isinstance(values, list):
+                return []
+            return [value[:100] for value in values[:MAX_ARGUMENTS_PER_TARGET] if isinstance(value, str)]
         verdict = matching.get("verdict")
         result.append(_Debate.model_validate({
             "name": stock["name"], "ticker": stock["ticker"],
