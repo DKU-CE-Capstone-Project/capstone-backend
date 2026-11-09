@@ -41,6 +41,8 @@ _FIELDS = {
     "method",
     "attempt",
     "error_type",
+    "validation_issues",
+    "discarded_arguments",
 }
 
 
