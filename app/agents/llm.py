@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from typing import Any
 from weakref import WeakKeyDictionary
 
 from app.config import settings
 from app.embedding_usage import record_embedding_usage
-from app.telemetry import observe
+from app.telemetry import observe, token_usage, usage_context
 
 _loop_clients: WeakKeyDictionary[asyncio.AbstractEventLoop, tuple[str, Any]] = WeakKeyDictionary()
+# Filled by the provider call when generate_with_usage() is waiting for its result.
+_usage_sink: ContextVar[dict | None] = ContextVar("llm_usage_sink", default=None)
 
 
 def _model_name() -> str:
@@ -32,15 +35,63 @@ def _client():
     return client
 
 
-async def generate(prompt: str) -> str:
+def _output_limit(max_output_tokens: int | None) -> int:
+    """Per-call output cap within the same bounds as LLM_MAX_OUTPUT_TOKENS."""
+    if max_output_tokens is None:
+        return settings.llm_max_output_tokens
+    return min(8192, max(512, int(max_output_tokens)))
+
+
+def _capture_usage(service: str, *, status: str, model: str | None, usage: Any = None) -> None:
+    sink = _usage_sink.get()
+    if sink is None:
+        return
+    tokens = token_usage(usage, service)
+    sink.update(service=service, model=model, status=status,
+                tokens_in=tokens.get("input_tokens"), tokens_out=tokens.get("output_tokens"))
+
+
+async def generate(prompt: str, *, purpose: str | None = None, max_output_tokens: int | None = None) -> str:
+    """Text generation. ``purpose`` becomes the telemetry stage (bull, judge, ...).
+
+    Without the keyword arguments the behaviour is unchanged, and a stage set by
+    the caller with ``@stage`` stays in effect.
+    """
+    if purpose is None:
+        return await _generate_with_timeout(prompt, max_output_tokens)
+    with usage_context(stage=purpose):
+        return await _generate_with_timeout(prompt, max_output_tokens)
+
+
+async def _generate_with_timeout(prompt: str, max_output_tokens: int | None) -> str:
     try:
-        return await asyncio.wait_for(_generate_with_provider(prompt), settings.gemini_timeout_seconds)
+        return await asyncio.wait_for(
+            _generate_with_provider(prompt, max_output_tokens=max_output_tokens),
+            settings.gemini_timeout_seconds,
+        )
     except TimeoutError:
         print("[llm] generation timeout")
+        _capture_usage("gemini", status="timeout", model=_model_name())
         return ""
 
 
-async def _generate_with_provider(prompt: str) -> str:
+async def generate_with_usage(
+    prompt: str, *, purpose: str | None = None, max_output_tokens: int | None = None,
+) -> tuple[str, dict]:
+    """Like generate(), also returning {service, model, status, tokens_in, tokens_out}.
+
+    For the v2 agent trace; existing callers keep using generate().
+    """
+    usage: dict = {}
+    token = _usage_sink.set(usage)
+    try:
+        text = await generate(prompt, purpose=purpose, max_output_tokens=max_output_tokens)
+    finally:
+        _usage_sink.reset(token)
+    return text, usage
+
+
+async def _generate_with_provider(prompt: str, *, max_output_tokens: int | None = None) -> str:
     """텍스트 생성. 기본 Gemini; auto 설정일 때만 Claude → Gemini fallback.
 
     임베딩(embed)은 항상 Gemini — Claude에는 임베딩 API가 없음.
@@ -53,7 +104,7 @@ async def _generate_with_provider(prompt: str) -> str:
         # Claude 실패(쿼터/오류) → Gemini로 fallback (provider=anthropic 강제 시엔 빈 문자열)
         if settings.llm_provider == "anthropic":
             return ""
-    return await _generate_gemini(prompt)
+    return await _generate_gemini(prompt, max_output_tokens=max_output_tokens)
 
 
 async def _generate_claude(prompt: str) -> str:
@@ -83,13 +134,15 @@ async def _generate_claude(prompt: str) -> str:
                 ],
             )
             usage_event.response(resp, usage=getattr(resp, "usage", None))
+        _capture_usage("anthropic", status="ok", model=settings.claude_model, usage=getattr(resp, "usage", None))
         return "".join(b.text for b in resp.content if b.type == "text").strip()
     except Exception as e:  # noqa: BLE001
         print(f"[llm] Claude error (fallback): {type(e).__name__}")
+        _capture_usage("anthropic", status="error", model=settings.claude_model)
         return ""
 
 
-async def _generate_gemini(prompt: str) -> str:
+async def _generate_gemini(prompt: str, *, max_output_tokens: int | None = None) -> str:
     """Gemini 호출. 키 없음/오류 시 빈 문자열(graceful)."""
     if not settings.google_api_key:
         return ""
@@ -105,7 +158,7 @@ async def _generate_gemini(prompt: str) -> str:
                 contents=prompt,
                 config=gtypes.GenerateContentConfig(
                     temperature=0.3,
-                    max_output_tokens=settings.llm_max_output_tokens,
+                    max_output_tokens=_output_limit(max_output_tokens),
                     service_tier=settings.gemini_service_tier,
                     http_options=gtypes.HttpOptions(
                         timeout=int(settings.gemini_timeout_seconds * 1000),
@@ -117,10 +170,12 @@ async def _generate_gemini(prompt: str) -> str:
                 ),
             )
             usage_event.response(resp, usage=getattr(resp, "usage_metadata", None))
+        _capture_usage("gemini", status="ok", model=_model_name(), usage=getattr(resp, "usage_metadata", None))
         return (resp.text or "").strip()
     except Exception as e:  # noqa: BLE001 — optional provider errors use a safe fallback
         # 할당량 초과·네트워크 오류 등은 조용히 fallback 처리
         print(f"[llm] Gemini error (fallback): {type(e).__name__}")
+        _capture_usage("gemini", status="error", model=_model_name())
         return ""
 
 
