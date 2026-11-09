@@ -14,7 +14,7 @@ from app.telemetry import emit, usage_context
 
 BULL_PROMPT_VERSION = "debate-bull-v2"
 BEAR_PROMPT_VERSION = "debate-bear-v2"
-JUDGE_PROMPT_VERSION = "debate-judge-v1"
+JUDGE_PROMPT_VERSION = "debate-judge-v2"
 MAX_STOCKS = 6
 MAX_ARGUMENTS_PER_TARGET = 2
 MAX_CLAIMS = 12
