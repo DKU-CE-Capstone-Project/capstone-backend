@@ -16,9 +16,9 @@ from app.v2.errors import V2Error
 
 OUTPUT_LIMITS = {"bull": 4096, "bear": 4096, "judge": 8192,
                  "analysis": 6144, "revise": 6144, "critic": 2048}
-# Version the analyst normalization with the prompts used for report reuse.
+# Version the analyst and judge normalization with the prompts used for report reuse.
 PROMPT_VERSIONS = {"bull": "debate-bull-v2", "bear": "debate-bear-v2",
-                   "judge": "debate-judge-v1", "analysis": "analysis-claims-v1",
+                   "judge": "debate-judge-v2", "analysis": "analysis-claims-v1",
                    "claims_critic": "claim-critic-v1", "revise": "revise-v1"}
 
 

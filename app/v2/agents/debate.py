@@ -14,7 +14,7 @@ from app.telemetry import emit, usage_context
 
 BULL_PROMPT_VERSION = "debate-bull-v2"
 BEAR_PROMPT_VERSION = "debate-bear-v2"
-JUDGE_PROMPT_VERSION = "debate-judge-v1"
+JUDGE_PROMPT_VERSION = "debate-judge-v2"
 MAX_STOCKS = 6
 MAX_ARGUMENTS_PER_TARGET = 2
 MAX_CLAIMS = 12
@@ -317,6 +317,10 @@ async def run_debate(evidence, rag, *, bull_generate, bear_generate, judge_gener
             raise
         try:
             payload = _parse(raw)
+            # Same six-target limit as the analysis fallback; trim the raw list
+            # because normalize_report pairs it with the validated stocks.
+            if isinstance(payload.get("stock_impacts"), list):
+                payload["stock_impacts"] = payload["stock_impacts"][:MAX_STOCKS]
             report = normalize_report(payload, evidence, claims_enabled=claims_enabled)
             debate = _debate_rows(payload.get("debate"), report, bull_available=bull is not None, bear_available=bear is not None)
         except (TypeError, ValueError):
