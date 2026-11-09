@@ -5,7 +5,7 @@ from copy import deepcopy
 
 import pytest
 
-from app.telemetry import _context
+from app.telemetry import _context, usage_context
 from app.v2.agents import debate
 from app.v2.provider_budget import ProviderBudgetError
 
@@ -80,14 +80,62 @@ async def test_normal_parallel_analysts_same_evidence_and_bounded_calls():
     assert rows == report_payload()["debate"]
 
 
+@pytest.mark.parametrize("side", ["bull", "bear"])
+async def test_overflow_keeps_first_two_for_each_target_and_reaches_judge(side, capsys):
+    template = side_payload()["arguments"][0]
+    targets = [template["name"], "은행", "운수", "건설", "화학", "바이오"]
+    allowed = [
+        {**template, "name": name, "text": f"{name} 논거 {number}"}
+        for number in (1, 2)
+        for name in targets
+    ]
+    excess = {**template, "text": "상한을 넘은 논거"}
+    calls = []
+
+    _, rows = await run(
+        **{side: generator({"arguments": [*allowed[:7], excess, *allowed[7:]]})},
+        judge=generator(report_payload(), calls),
+    )
+
+    assert [item["text"] for item in calls[0][0][side]] == [item["text"] for item in allowed]
+    assert rows[0][side]
+    event = json.loads(capsys.readouterr().out)
+    assert event["kind"] == "agent_output_normalized"
+    assert event["stage"] == side
+    assert event["discarded_arguments"] == 1
+
+
 @pytest.mark.parametrize("failed_side", ["bull", "bear"])
-async def test_one_invalid_side_continues_and_forces_failed_array_empty(failed_side):
+async def test_one_invalid_side_continues_and_forces_failed_array_empty(failed_side, capsys):
     calls = []
     report, rows = await run(**{failed_side: generator('{"arguments":[')}, judge=generator(report_payload(), calls))
     assert report["title"] == "수출 분석"
     assert calls[0][0][failed_side] is None
     assert rows[0][failed_side] == []
     assert rows[0]["bear" if failed_side == "bull" else "bull"]
+    event = json.loads(capsys.readouterr().out)
+    assert event["kind"] == "agent_output_validation"
+    assert event["stage"] == failed_side
+    assert event["error_type"] == "invalid_json"
+
+
+async def test_invalid_analyst_schema_logs_field_and_code_without_response_values(capsys):
+    payload = side_payload()
+    marker = "private-provider-output"
+    payload["arguments"][0]["text"] = marker * 10
+    job_id = "400b5319-b7f7-4bc3-b41e-be316db87e5f"
+
+    with usage_context(job_id=job_id):
+        _, rows = await run(bear=generator(payload))
+
+    assert rows[0]["bear"] == []
+    output = capsys.readouterr().out
+    assert marker not in output
+    event = json.loads(output)
+    assert event["job_id"] == job_id
+    assert event["stage"] == "bear"
+    assert event["error_type"] == "invalid_argument_schema"
+    assert event["validation_issues"] == [{"path": ["arguments", 0, "text"], "type": "string_too_long"}]
 
 
 async def test_both_unusable_sides_signal_existing_analysis_fallback_to_caller():
