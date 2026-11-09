@@ -71,7 +71,9 @@ async def _generate_with_timeout(prompt: str, max_output_tokens: int | None) -> 
         )
     except TimeoutError:
         print("[llm] generation timeout")
-        _capture_usage("gemini", status="timeout", model=_model_name())
+        usage = _usage_sink.get()
+        if usage is not None:
+            usage["status"] = "timeout"
         return ""
 
 
@@ -80,9 +82,16 @@ async def generate_with_usage(
 ) -> tuple[str, dict]:
     """Like generate(), also returning {service, model, status, tokens_in, tokens_out}.
 
-    For the v2 agent trace; existing callers keep using generate().
+    If generation is unavailable before a provider can be selected, the status
+    is error and the provider, model, and counts are None.
     """
-    usage: dict = {}
+    usage = {
+        "service": None,
+        "model": None,
+        "status": "error",
+        "tokens_in": None,
+        "tokens_out": None,
+    }
     token = _usage_sink.set(usage)
     try:
         text = await generate(prompt, purpose=purpose, max_output_tokens=max_output_tokens)
@@ -98,7 +107,7 @@ async def _generate_with_provider(prompt: str, *, max_output_tokens: int | None 
     """
     use_claude = settings.anthropic_api_key and settings.llm_provider in ("auto", "anthropic")
     if use_claude:
-        text = await _generate_claude(prompt)
+        text = await _generate_claude(prompt, max_output_tokens=max_output_tokens)
         if text:
             return text
         # Claude 실패(쿼터/오류) → Gemini로 fallback (provider=anthropic 강제 시엔 빈 문자열)
@@ -107,8 +116,9 @@ async def _generate_with_provider(prompt: str, *, max_output_tokens: int | None 
     return await _generate_gemini(prompt, max_output_tokens=max_output_tokens)
 
 
-async def _generate_claude(prompt: str) -> str:
+async def _generate_claude(prompt: str, *, max_output_tokens: int | None = None) -> str:
     """Claude(Anthropic) 호출. 오류/미설치 시 빈 문자열(graceful)."""
+    model = settings.claude_model
     try:
         from anthropic import AsyncAnthropic
 
@@ -116,10 +126,10 @@ async def _generate_claude(prompt: str) -> str:
         # opus/sonnet 4.x는 temperature/top_p 미지원(400) — 전달하지 않음.
         # cache_control: 동일 프롬프트가 5분 내 반복되면 프리픽스 캐싱(프롬프트가 최소 길이 이상일 때).
         # 실질 비용 절감은 app-level 결과 캐싱(summary_cache/report_index)이 담당.
-        with observe("anthropic", "generate", model=settings.claude_model) as usage_event:
+        with observe("anthropic", "generate", model=model) as usage_event:
             resp = await client.messages.create(
-                model=settings.claude_model,
-                max_tokens=1024,
+                model=model,
+                max_tokens=1024 if max_output_tokens is None else _output_limit(max_output_tokens),
                 messages=[
                     {
                         "role": "user",
@@ -134,11 +144,14 @@ async def _generate_claude(prompt: str) -> str:
                 ],
             )
             usage_event.response(resp, usage=getattr(resp, "usage", None))
-        _capture_usage("anthropic", status="ok", model=settings.claude_model, usage=getattr(resp, "usage", None))
+        _capture_usage("anthropic", status="ok", model=model, usage=getattr(resp, "usage", None))
         return "".join(b.text for b in resp.content if b.type == "text").strip()
+    except asyncio.CancelledError:
+        _capture_usage("anthropic", status="cancelled", model=model)
+        raise
     except Exception as e:  # noqa: BLE001
         print(f"[llm] Claude error (fallback): {type(e).__name__}")
-        _capture_usage("anthropic", status="error", model=settings.claude_model)
+        _capture_usage("anthropic", status="error", model=model)
         return ""
 
 
@@ -146,15 +159,16 @@ async def _generate_gemini(prompt: str, *, max_output_tokens: int | None = None)
     """Gemini 호출. 키 없음/오류 시 빈 문자열(graceful)."""
     if not settings.google_api_key:
         return ""
+    model = _model_name()
     try:
         client = _client()  # SDK import은 try 안에서 — 미설치 시에도 graceful fallback
         if client is None:
             return ""
         from google.genai import types as gtypes
 
-        with observe("gemini", "generate", model=_model_name(), service_tier=settings.gemini_service_tier) as usage_event:
+        with observe("gemini", "generate", model=model, service_tier=settings.gemini_service_tier) as usage_event:
             resp = await client.aio.models.generate_content(
-                model=_model_name(),
+                model=model,
                 contents=prompt,
                 config=gtypes.GenerateContentConfig(
                     temperature=0.3,
@@ -170,12 +184,15 @@ async def _generate_gemini(prompt: str, *, max_output_tokens: int | None = None)
                 ),
             )
             usage_event.response(resp, usage=getattr(resp, "usage_metadata", None))
-        _capture_usage("gemini", status="ok", model=_model_name(), usage=getattr(resp, "usage_metadata", None))
+        _capture_usage("gemini", status="ok", model=model, usage=getattr(resp, "usage_metadata", None))
         return (resp.text or "").strip()
+    except asyncio.CancelledError:
+        _capture_usage("gemini", status="cancelled", model=model)
+        raise
     except Exception as e:  # noqa: BLE001 — optional provider errors use a safe fallback
         # 할당량 초과·네트워크 오류 등은 조용히 fallback 처리
         print(f"[llm] Gemini error (fallback): {type(e).__name__}")
-        _capture_usage("gemini", status="error", model=_model_name())
+        _capture_usage("gemini", status="error", model=model)
         return ""
 
 
