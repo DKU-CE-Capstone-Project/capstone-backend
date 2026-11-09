@@ -46,6 +46,9 @@ def offline_settings(monkeypatch):
         "use_llm_summaries": False,
         "use_rag": False,
         "use_critic": False,
+        "v2_multi_agent": False,
+        "v2_claim_check": False,
+        "v2_revise_max_rounds": 0,
         "news_map_supplement_max_searches": 0,
     }.items():
         monkeypatch.setattr(settings, key, value)

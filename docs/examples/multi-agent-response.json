@@ -1,0 +1,172 @@
+{
+  "fixture_only": true,
+  "note": "시간·판정은 합성 예시이며 실측 결과가 아님. elapsed_ms=0은 측정값이 아님. 공개 API 형식으로 input_excerpt는 없음.",
+  "report": {
+    "schema_version": 2,
+    "report_id": "00000000-0000-4000-8000-000000000001",
+    "title": "[합성 예시] 업종 영향 분석",
+    "event_summary": "예시 회사의 수출 증가 보도",
+    "event_analysis": "증가 사실과 지속 가능성에 대한 해석을 구분함.",
+    "market_impact": "단기 기대와 추세 불확실성이 함께 존재함.",
+    "stock_impacts": [
+      {
+        "ticker": null,
+        "name": "[합성] 가나반도체",
+        "impact": "단기 개선과 불확실성 공존",
+        "direction": "mixed",
+        "evidence_news_ids": [
+          "news-001"
+        ],
+        "claim_ids": [
+          "c1"
+        ]
+      }
+    ],
+    "risk_factors": [
+      "하나의 기사만으로 지속 추세를 판단하기 어려움"
+    ],
+    "requested_news_ids": [
+      "news-001"
+    ],
+    "used_evidence": [
+      {
+        "news_id": "news-001",
+        "title": "[합성] 수출 증가 예시",
+        "source_name": "합성 자료",
+        "source_url": "https://example.invalid/news-001",
+        "published_at": "2026-11-08T00:00:00Z",
+        "body_id": "00000000-0000-4000-8000-000000000002",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "input_char_count": 20,
+        "truncated": false
+      }
+    ],
+    "failed_evidence": [],
+    "coverage": {
+      "requested_count": 1,
+      "used_count": 1,
+      "failed_count": 0
+    },
+    "rag_evidence": [],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "가나반도체의 수출이 증가했다.",
+        "kind": "fact",
+        "evidence": [
+          {
+            "news_id": "news-001",
+            "sentence": "가나반도체의 수출이 증가했다."
+          }
+        ],
+        "falsifier": null,
+        "verdict": "supported",
+        "sentence_found": true,
+        "reason": "합성 원문과 일치하는 예시 판정"
+      }
+    ],
+    "debate": [
+      {
+        "name": "[합성] 가나반도체",
+        "ticker": null,
+        "bull": [
+          "수출 증가가 실적 기대를 높일 수 있다."
+        ],
+        "bear": [
+          "단일 관측을 추세로 일반화하기 어렵다."
+        ],
+        "direction": "mixed",
+        "verdict": "기대와 불확실성이 함께 존재한다.",
+        "evidence_news_ids": [
+          "news-001"
+        ]
+      }
+    ],
+    "agent_trace": [
+      {
+        "seq": 1,
+        "agent": "bull",
+        "elapsed_ms": 0,
+        "summary": "합성 강세 논거 예시",
+        "decision": "ok"
+      },
+      {
+        "seq": 2,
+        "agent": "bear",
+        "elapsed_ms": 0,
+        "summary": "합성 레드팀 논거 예시",
+        "decision": "ok"
+      },
+      {
+        "seq": 3,
+        "agent": "judge",
+        "elapsed_ms": 0,
+        "summary": "합성 중재 결과 예시",
+        "decision": "ok"
+      },
+      {
+        "seq": 4,
+        "agent": "critic",
+        "elapsed_ms": 0,
+        "summary": "합성 검증 결과 예시",
+        "decision": "ok"
+      }
+    ],
+    "verification": {
+      "status": "passed",
+      "notes": [],
+      "claims_summary": {
+        "total": 1,
+        "supported": 1,
+        "refuted": 0,
+        "unclear": 0,
+        "sentence_missing": 0
+      },
+      "revision": {
+        "attempts": 0,
+        "adopted": false,
+        "initial_status": "passed",
+        "initial_notes": [],
+        "rounds": []
+      }
+    },
+    "created_at": "2026-11-08T00:00:00Z"
+  },
+  "strategy": {
+    "schema_version": 2,
+    "strategy_id": "00000000-0000-4000-8000-000000000003",
+    "report_id": "00000000-0000-4000-8000-000000000001",
+    "risk_level": "medium",
+    "period": "short",
+    "strategy_summary": "합성 관망 예시",
+    "risk_warning": "기능 확인용 합성 자료임.",
+    "strategy_items": [
+      {
+        "ticker": null,
+        "stock_name": "[합성] 가나반도체",
+        "action": "watch",
+        "reason": "지속 여부 확인이 필요함."
+      }
+    ],
+    "created_at": "2026-11-08T00:00:00Z",
+    "agent_trace": [
+      {
+        "seq": 1,
+        "agent": "strategy",
+        "elapsed_ms": 0,
+        "summary": "합성 전략 결과 예시",
+        "decision": "ok"
+      }
+    ]
+  },
+  "job_stages": [
+    "queued",
+    "extracting",
+    "debating",
+    "judging",
+    "verifying",
+    "saving",
+    "strategy",
+    "done"
+  ]
+}
