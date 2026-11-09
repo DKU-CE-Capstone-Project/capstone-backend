@@ -290,6 +290,10 @@ async def run_debate(evidence, rag, *, bull_generate, bear_generate, judge_gener
             raise
         try:
             payload = _parse(raw)
+            # Same six-target limit as the analysis fallback; trim the raw list
+            # because normalize_report pairs it with the validated stocks.
+            if isinstance(payload.get("stock_impacts"), list):
+                payload["stock_impacts"] = payload["stock_impacts"][:MAX_STOCKS]
             report = normalize_report(payload, evidence, claims_enabled=claims_enabled)
             debate = _debate_rows(payload.get("debate"), report, bull_available=bull is not None, bear_available=bear is not None)
         except (TypeError, ValueError):

@@ -118,11 +118,32 @@ async def test_invalid_base_report_stays_a_failure():
         await run(judge=generator(payload))
 
 
-async def test_too_many_stock_impacts_rejected_on_new_path():
+def many_stocks_payload(count):
     payload = report_payload()
-    payload["stock_impacts"] *= 7
-    with pytest.raises(debate.DebateOutputError):
+    template = payload["stock_impacts"][0]
+    payload["stock_impacts"] = [dict(template, name=f"종목{index}") for index in range(count)]
+    return payload
+
+
+@pytest.mark.parametrize("count", [7, 25])
+async def test_judge_stock_impacts_over_limit_keep_first_six_in_order(count):
+    report, rows = await run(judge=generator(many_stocks_payload(count)))
+    expected = [f"종목{index}" for index in range(6)]
+    assert [stock["name"] for stock in report["stock_impacts"]] == expected
+    assert [row["name"] for row in rows] == expected
+    assert all(stock["claim_ids"] == ["c1"] for stock in report["stock_impacts"])
+
+
+async def test_judge_stock_impacts_not_a_list_stays_a_failure():
+    payload = report_payload()
+    payload["stock_impacts"] = {"name": "반도체 업종"}
+    with pytest.raises(debate.DebateOutputError, match="invalid_judgement"):
         await run(judge=generator(payload))
+
+
+def test_normalize_report_still_rejects_too_many_stock_impacts():
+    with pytest.raises(debate.DebateOutputError, match="too_many_stocks"):
+        debate.normalize_report(many_stocks_payload(7), EVIDENCE, claims_enabled=True)
 
 
 def test_optional_claims_drop_individual_bad_fields_and_clear_untrusted_verdicts():
