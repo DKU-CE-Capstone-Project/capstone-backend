@@ -45,6 +45,11 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
 ]
+# scripts/post_track.py 전용. Dockerfile은 extra 없이 설치하므로 운영 이미지에 들어가지 않는다.
+post-track = [
+    "finance-datareader>=0.9",
+    "pykrx>=1.0",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
