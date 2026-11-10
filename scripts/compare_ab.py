@@ -21,9 +21,13 @@ from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import product
 from pathlib import Path
+from uuid import uuid4
 
 SCHEMA_VERSION = 1
+BATCH_SCHEMA_VERSION = 2
+MAX_INPUT_CASES = 10
 ARM_CONFIGS = {
     "A": (False, False, 0),
     "B": (True, False, 2),
@@ -83,6 +87,8 @@ def read_json(path: Path) -> dict:
 
 def evidence_snapshot(payload: dict) -> tuple[list[dict], list[dict], dict]:
     """Require the persisted excerpts; public v2 DTOs cannot reproduce model input."""
+    if not isinstance(payload, dict):
+        raise ComparisonError("EXPECTED_INPUT_OBJECT")
     report = payload.get("report", payload)
     if not isinstance(report, dict):
         raise ComparisonError("EXPECTED_REPORT_OBJECT")
@@ -118,6 +124,20 @@ def evidence_snapshot(payload: dict) -> tuple[list[dict], list[dict], dict]:
             or options.get("period") not in {"short", "mid", "long"}):
         raise ComparisonError("INVALID_STRATEGY_OPTIONS")
     return evidence, rag, {"risk_level": options["risk_level"], "period": options["period"]}
+
+
+def _snapshots(payload: dict | list[dict]):
+    cases = payload if isinstance(payload, list) else [payload]
+    if not 1 <= len(cases) <= MAX_INPUT_CASES:
+        raise ComparisonError("EXPECTED_1_TO_10_INPUT_CASES")
+    return [evidence_snapshot(case) for case in cases]
+
+
+def _planned_calls(arms: list[str], repeats: int, case_count: int, max_calls: int) -> int:
+    planned = sum(CALL_BOUNDS[arm] for arm in arms) * repeats * case_count
+    if planned > max_calls:
+        raise ComparisonError("CALL_LIMIT_BELOW_PLANNED_UPPER_BOUND")
+    return planned
 
 
 def validate_arms(arms: list[str]) -> None:
@@ -391,23 +411,30 @@ def save_outputs(directory: Path, record: dict, seed: int) -> None:
     directory.mkdir(parents=True, exist_ok=False)
     completed = [r for r in record["runs"] if r["outcome"] == "completed"]
     random.Random(seed).shuffle(completed)
+    cases = record.get("cases")
+    prefix = f"sample-{uuid4().hex}-" if cases else "sample-"
     blind_rows, key_rows = [], []
     for index, run in enumerate(completed, 1):
-        assessment_id = f"sample-{index:03d}"
+        assessment_id = f"{prefix}{index:03d}"
+        case_ref = {"case_id": run["case_id"]} if cases else {}
         blind_rows.append({
-            "assessment_id": assessment_id, "content": _blind_text(run["result"]),
+            "assessment_id": assessment_id, **case_ref, "content": _blind_text(run["result"]),
             "grounding_0_1_2": "", "important_information_0_1_2": "", "comments": "",
         })
-        key_rows.append({"assessment_id": assessment_id, "arm": run["arm"], "repeat": run["repeat"]})
+        key_rows.append({"assessment_id": assessment_id, **case_ref,
+                         "arm": run["arm"], "repeat": run["repeat"]})
     rows = []
     for run in record["runs"]:
         result = run.get("result", {})
         impacts = result.get("report", {}).get("stock_impacts", [])
         strategies = result.get("strategy", {}).get("strategy_items", [])
         usage = result.get("usage") or {}
+        case_id = run.get("case_id")
+        input_digest = cases[case_id]["input_digest"] if cases else record["input_digest"]
         rows.append({
+            **({"case_id": case_id} if cases else {}),
             "arm": run["arm"], "repeat": run["repeat"], "outcome": run["outcome"],
-            "input_digest": record["input_digest"], "execution_mode": record["execution_mode"],
+            "input_digest": input_digest, "execution_mode": record["execution_mode"],
             "elapsed_ms": run["elapsed_ms"], "logical_generate_calls": run["logical_generate_calls"],
             "tokens_in": usage.get("tokens_in"), "tokens_out": usage.get("tokens_out"),
             "est_cost_usd": usage.get("est_cost_usd"),
@@ -421,14 +448,15 @@ def save_outputs(directory: Path, record: dict, seed: int) -> None:
     (directory / "comparison.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     _write_csv(directory / "comparison.csv", rows, list(rows[0]))
     _write_csv(directory / "blind_scores.csv", blind_rows, [
-        "assessment_id", "content", "grounding_0_1_2", "important_information_0_1_2", "comments",
+        "assessment_id", *(["case_id"] if cases else []), "content",
+        "grounding_0_1_2", "important_information_0_1_2", "comments",
     ])
     (directory / "answer_key.json").write_text(json.dumps({
         "input_digest": record["input_digest"], "seed": seed, "samples": key_rows,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-async def compare(payload: dict, arms: list[str], directory: Path, *, runner,
+async def compare(payload: dict | list[dict], arms: list[str], directory: Path, *, runner,
                   execution_mode: str = "fixture", max_calls: int = 0,
                   repeats: int = 1, seed: int = 0) -> dict:
     validate_arms(arms)
@@ -436,18 +464,27 @@ async def compare(payload: dict, arms: list[str], directory: Path, *, runner,
         raise ComparisonError("INVALID_COMPARISON_OPTIONS")
     if type(max_calls) is not int or max_calls < 0:
         raise ComparisonError("INVALID_CALL_LIMIT")
-    planned = sum(CALL_BOUNDS[arm] for arm in arms) * repeats if execution_mode == "live" else 0
-    if planned > max_calls:
-        raise ComparisonError("CALL_LIMIT_BELOW_PLANNED_UPPER_BOUND")
+    snapshots = _snapshots(payload)
+    planned = _planned_calls(arms, repeats, len(snapshots), max_calls) if execution_mode == "live" else 0
     if directory.exists():
         raise FileExistsError(directory)
-    evidence, rag, options = evidence_snapshot(payload)
+    cases = {
+        f"case-{index:03d}": {
+            "input_digest": _digest({
+                "used_evidence": evidence, "rag_evidence": rag, "strategy_options": options,
+            }),
+            "selected_news_ids": [item["news_id"] for item in evidence],
+        }
+        for index, (evidence, rag, options) in enumerate(snapshots, 1)
+    }
+    if len({case["input_digest"] for case in cases.values()}) != len(cases):
+        raise ComparisonError("DUPLICATE_INPUT_CASE")
+    batch = len(snapshots) > 1
+    inputs = {"input_digest": _digest(cases), "cases": cases} if batch else cases["case-001"]
     limit = CallLimit(max_calls)
     record = {
-        "schema_version": SCHEMA_VERSION, "started_at": datetime.now(UTC).isoformat(),
-        "execution_mode": execution_mode, "input_digest": _digest({
-            "used_evidence": evidence, "rag_evidence": rag, "strategy_options": options,
-        }), "selected_news_ids": [e["news_id"] for e in evidence],
+        "schema_version": BATCH_SCHEMA_VERSION if batch else SCHEMA_VERSION,
+        "started_at": datetime.now(UTC).isoformat(), "execution_mode": execution_mode, **inputs,
         "planned_logical_calls_upper_bound": planned, "max_logical_calls": max_calls,
         "call_count_scope": "llm.generate entry calls; not SDK-internal retries, HTTP attempts, or bills",
         "arms": {arm: dict(zip(("multi_agent", "claim_check", "revise_max_rounds"), ARM_CONFIGS[arm])) for arm in arms},
@@ -455,27 +492,30 @@ async def compare(payload: dict, arms: list[str], directory: Path, *, runner,
         "runs": [],
     }
     try:
-        for repeat in range(1, repeats + 1):
-            for arm in arms:
-                started, prior_calls = time.monotonic(), limit.started
-                run = {"arm": arm, "repeat": repeat, "outcome": "error"}
-                try:
-                    result = await runner(arm, deepcopy(evidence), deepcopy(rag), deepcopy(options), limit)
-                    run.update(outcome="completed", result=_public_result(result))
-                except asyncio.CancelledError:
-                    run.update(outcome="interrupted", error_code="INTERRUPTED")
-                    raise
-                except CallLimitExceeded:
-                    run["error_code"] = "LOGICAL_GENERATION_CALL_LIMIT"
-                except Exception:  # noqa: BLE001 — isolate arm errors without exporting provider details
-                    # Provider errors and fixture content are never copied into logs.
-                    run["error_code"] = "COMPARISON_ARM_FAILED"
-                finally:
-                    run.update(elapsed_ms=round((time.monotonic() - started) * 1000, 2),
-                               logical_generate_calls=limit.started-prior_calls)
-                    record["runs"].append(run)
-                if run.get("error_code") == "LOGICAL_GENERATION_CALL_LIMIT":
-                    return record
+        runs = product(zip(cases, snapshots, strict=True), range(1, repeats + 1), arms)
+        for (case_id, snapshot), repeat, arm in runs:
+            started, prior_calls = time.monotonic(), limit.started
+            evidence, rag, options = snapshot
+            run = {"arm": arm, "repeat": repeat, "outcome": "error"}
+            if batch:
+                run["case_id"] = case_id
+            try:
+                result = await runner(arm, deepcopy(evidence), deepcopy(rag), deepcopy(options), limit)
+                run.update(outcome="completed", result=_public_result(result))
+            except asyncio.CancelledError:
+                run.update(outcome="interrupted", error_code="INTERRUPTED")
+                raise
+            except CallLimitExceeded:
+                run["error_code"] = "LOGICAL_GENERATION_CALL_LIMIT"
+            except Exception:  # noqa: BLE001 — isolate arm errors without exporting provider details
+                # Provider errors and fixture content are never copied into logs.
+                run["error_code"] = "COMPARISON_ARM_FAILED"
+            finally:
+                run.update(elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+                           logical_generate_calls=limit.started-prior_calls)
+                record["runs"].append(run)
+            if run.get("error_code") == "LOGICAL_GENERATION_CALL_LIMIT":
+                return record
     finally:
         record["finished_at"] = datetime.now(UTC).isoformat()
         record["logical_generate_calls"] = limit.started
@@ -485,7 +525,8 @@ async def compare(payload: dict, arms: list[str], directory: Path, *, runner,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True, help="Local persistence export with input_excerpt")
+    parser.add_argument("--input", type=Path, action="append", required=True,
+                        help="Local persistence export with input_excerpt (repeat for up to 10 cases)")
     parser.add_argument("--output-dir", type=Path, required=True, help="New output directory")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--fixtures", type=Path, help="Replay supplied outputs without model calls")
@@ -499,10 +540,12 @@ def main(argv=None) -> int:
         validate_arms(args.arms)
         if not 1 <= args.repeats <= 20 or args.max_calls < 0:
             raise ComparisonError("INVALID_COMPARISON_OPTIONS")
-        if args.live and args.max_calls < sum(CALL_BOUNDS[arm] for arm in args.arms) * args.repeats:
-            raise ComparisonError("CALL_LIMIT_BELOW_PLANNED_UPPER_BOUND")
-        payload = read_json(args.input)
-        evidence_snapshot(payload)
+        if len(args.input) > MAX_INPUT_CASES:
+            raise ComparisonError("EXPECTED_1_TO_10_INPUT_CASES")
+        if args.live:
+            _planned_calls(args.arms, args.repeats, len(args.input), args.max_calls)
+        payload = [read_json(path) for path in args.input]
+        _snapshots(payload)
         if args.live:
             # Script invocation must use this checkout, not another editable install.
             sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
