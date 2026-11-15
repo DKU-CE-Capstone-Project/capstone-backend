@@ -78,13 +78,32 @@ python -m scripts.compare_ab --input evidence-export.json --fixtures fixtures.js
 python -m scripts.compare_ab --input evidence-export.json --live --arms A B C --max-calls 24 --output-dir comparison-live --seed 19
 ```
 
-위 명령은 API를 호출하는 예시이며 이번 검증에서는 실행하지 않음. 필요한 WP4·WP3·WP12가
-병합되기 전에는 고급 구성을 거부함. A/B/C 1회씩의 보수적 생성 진입 상한은 24회임.
+위 명령은 API를 호출하는 예시임. 필요한 WP4·WP3·WP12 의존성이 없으면 고급 구성을 거부함. A/B/C 1회씩의 보수적 생성 진입 상한은 24회임.
 `--repeats 2`이면 최소 `--max-calls 48`이 필요함. 회차는 1~20회로 제한함.
 
 live 실행은 독립 CLI 프로세스 안에서 구성 플래그와 생성 함수·telemetry 수집기를
 일시 교체하고 종료 시 복원함. API 서버·워커 프로세스 안에서 병렬 요청과 함께
 호출하지 않음. CLI는 구성들을 순서대로 실행하고, 토론 내부의 병렬 생성은 유지함.
+
+## 여러 근거 묶음을 한 번에 비교
+
+`--input`을 반복해서 최대 10개까지 지정하면 각 묶음을 같은 A/B/C 구성으로 실행함.
+같은 입력을 여러 번 지정하면 거부함. 동일 근거의 반복 생성에는 `--repeats`를 사용함.
+모든 입력과 전체 계획 상한을 모델 호출 전에
+검사하고 하나의 `--max-calls`를 공유함. A/B/C 기준 최대 계획은 묶음 수 × 반복 수 ×
+24회임. 예를 들어 2개 묶음을 1회씩 비교하는 live 명령은 다음과 같음.
+
+```sh
+python -m scripts.compare_ab --input evidence-01.json --input evidence-02.json --live --arms A B C --max-calls 48 --output-dir comparison-batch --seed 19
+```
+
+- 여러 입력의 산출물은 스키마 2임. 입력 순서대로 `case-001`부터 부여하며 `comparison.json`의
+  `cases`에 묶음별 근거 해시와 기사 ID를 저장함. 단일 입력의 스키마와 CSV 열은 유지함.
+- 전체 완료 결과를 섞어 블라인드 CSV 한 장으로 출력함. `case_id`로 해당 근거 묶음을
+  찾을 수 있고, 평가 ID는 실행마다 새로 부여함. 채점자에게는 구성과 반복 회차를 숨긴
+  채점표 및 `case_id`에 대응하는 근거를 전달함.
+- 다중 입력 fixture 모드는 같은 구성별 출력 fixture를 재사용함. 채점표 형식과 실행
+  순서를 확인하는 용도임. 여러 묶음의 품질 차이는 실제 재생성 뒤에 평가함.
 
 ## 산출물과 평가
 
