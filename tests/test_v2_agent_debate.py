@@ -165,7 +165,7 @@ async def test_truncated_judge_json_fails_without_including_provider_output(caps
     assert [json.loads(line)["error_type"] for line in output.splitlines()] == ["invalid_json", "invalid_json"]
 
 
-async def test_invalid_base_report_stays_a_failure():
+async def test_invalid_base_report_signals_fallback():
     payload = report_payload()
     payload.pop("event_analysis")
     with pytest.raises(debate.DebateUnavailable, match="invalid_judgement"):
@@ -261,7 +261,7 @@ async def test_judge_stock_impacts_over_limit_keep_first_six_in_order(count):
     assert all(stock["claim_ids"] == ["c1"] for stock in report["stock_impacts"])
 
 
-async def test_judge_stock_impacts_not_a_list_stays_a_failure():
+async def test_judge_stock_impacts_not_a_list_signals_fallback():
     payload = report_payload()
     payload["stock_impacts"] = {"name": "반도체 업종"}
     with pytest.raises(debate.DebateUnavailable, match="invalid_judgement"):

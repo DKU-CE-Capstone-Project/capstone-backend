@@ -24,6 +24,10 @@ _CLAIM_ID = re.compile(r"c(?:[1-9]|1[0-2])\Z")
 Generator = Callable[..., Awaitable[str]]
 
 
+# Values of verification.fallback.reason; the API schema must accept exactly these.
+FALLBACK_REASONS = ("analysts_unavailable", "invalid_judgement")
+
+
 class DebateUnavailable(ValueError):
     """No usable debate result; caller may use analyze().
 
@@ -307,7 +311,11 @@ def _debate_rows(raw, report: dict, *, bull_available: bool, bear_available: boo
 
 
 async def run_debate(evidence, rag, *, bull_generate, bear_generate, judge_generate, claims_enabled):
-    """Run independent analysts concurrently and judge usable proposals once.
+    """Run independent analysts concurrently, then judge usable proposals.
+
+    The judge runs up to ``JUDGE_ATTEMPTS`` times when its output fails
+    validation; if every attempt fails, ``DebateUnavailable`` lets the caller
+    replace the debate with analyze().
 
     Injected generators own checkpointing, reservation, actual provider calls,
     and caller-stage updates. Control failures propagate and cancel siblings.

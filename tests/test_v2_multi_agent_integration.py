@@ -334,6 +334,9 @@ async def test_both_analysts_unusable_fall_back_once_without_judge(mock_componen
     assert [(row["agent"], row["decision"]) for row in report["agent_trace"]] == [
         ("bull", "failed"), ("bear", "failed"), ("analysis", "ok"), ("critic", "warning")]
     assert report["verification"]["fallback"] == {"reason": "analysts_unavailable", "replacement": "analysis"}
+    stored = next(iter(persistence._memory["reports"].values()))
+    assert stored["reuse_eligible"] is False
+    assert await persistence.reusable_report(stored["generation_key"]) is None
     assert "judging" not in mock_components["stages"]
     assert "analyzing" in mock_components["stages"]
     assert state._memory[budget._job_key(job["job_id"])][1]["units"] == 5
@@ -372,6 +375,9 @@ async def test_invalid_judgement_twice_completes_with_analysis_fallback(mock_com
     assert report["verification"]["fallback"] == {"reason": "invalid_judgement", "replacement": "analysis"}
     stored = next(iter(persistence._memory["reports"].values()))
     assert stored["verification"]["fallback"] == report["verification"]["fallback"]
+    # A fallback report has no debate; the same articles must be generated again, not reused.
+    assert stored["reuse_eligible"] is False
+    assert await persistence.reusable_report(stored["generation_key"]) is None
     # Normal maximum 21 + one judge retry + one analysis fallback stays under job 32.
     assert state._memory[budget._job_key(job["job_id"])][1]["units"] == 7
 
@@ -438,3 +444,24 @@ async def test_strategy_prompt_receives_only_legacy_verification_fields(mock_com
                               "revision": {"attempts": 1, "fixture_secret": "do-not-forward"}}
     await GENERATE_STRATEGY(report, risk_level="low", period="short")
     assert prompts[0]["report"]["verification"] == {"status": "warning", "notes": ["fixture"]}
+
+
+def test_fallback_reasons_match_response_schema():
+    import typing
+    from app.v2.agents.debate import FALLBACK_REASONS
+    annotation = schemas.VerificationFallback.model_fields["reason"].annotation
+    assert set(typing.get_args(annotation)) == set(FALLBACK_REASONS)
+
+
+async def test_unknown_fallback_reason_fails_before_saving(mock_components, monkeypatch):
+    from app.v2.agents import debate
+    monkeypatch.setattr(settings, "v2_multi_agent", True)
+
+    async def unavailable(*args, **kwargs):
+        raise debate.DebateUnavailable("new_unlisted_reason")
+
+    monkeypatch.setattr(debate, "run_debate", unavailable)
+    sid, map_id, ids = await helpers.fixture_map()
+    job = await helpers.finish(sid, await helpers.submit(sid, map_id, ids))
+    assert job["status"] == "failed" and job["error"]["code"] == "REPORT_GENERATION_FAILED"
+    assert not persistence._memory["reports"]
