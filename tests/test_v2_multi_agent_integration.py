@@ -333,9 +333,47 @@ async def test_both_analysts_unusable_fall_back_once_without_judge(mock_componen
     assert report["debate"] == [] and "claims" not in report
     assert [(row["agent"], row["decision"]) for row in report["agent_trace"]] == [
         ("bull", "failed"), ("bear", "failed"), ("analysis", "ok"), ("critic", "warning")]
+    assert report["verification"]["fallback"] == {"reason": "analysts_unavailable", "replacement": "analysis"}
     assert "judging" not in mock_components["stages"]
     assert "analyzing" in mock_components["stages"]
     assert state._memory[budget._job_key(job["job_id"])][1]["units"] == 5
+
+
+async def test_invalid_judgement_twice_completes_with_analysis_fallback(mock_components, monkeypatch):
+    """R1 2026-11-23 (job 6b5accf4): judge output failed validation and the job failed."""
+    monkeypatch.setattr(settings, "v2_multi_agent", True)
+    calls = []
+
+    async def generate(prompt, *, purpose=None, max_output_tokens=None):
+        calls.append(purpose)
+        if purpose in {"bull", "bear"}:
+            return json.dumps({"arguments": [{"name": "반도체 업종", "ticker": None, "text": "논거",
+                               "kind": "interpretation",
+                               "evidence": [{"news_id": "article-0", "sentence": "실제 추출 본문 근거입니다."}],
+                               "falsifier": None}]})
+        if purpose == "judge":
+            invalid = payload()
+            invalid["stock_impacts"][0]["evidence_news_ids"] = ["rag-only-id"]
+            return json.dumps(invalid, ensure_ascii=False)
+        assert purpose is None
+        return json.dumps(payload(), ensure_ascii=False)
+
+    monkeypatch.setattr(reports.llm, "generate", generate)
+    sid, map_id, ids = await helpers.fixture_map()
+    job = await helpers.finish(sid, await helpers.submit(sid, map_id, ids))
+    assert job["status"] == "completed", job
+    report = await read_http(sid, f'/api/v2/reports/{job["result"]["report_id"]}')
+    assert calls == ["bull", "bear", "judge", "judge", None]
+    assert report["debate"] == [] and "claims" not in report
+    assert report["stock_impacts"][0]["evidence_news_ids"] == ["article-0"]
+    assert [(row["agent"], row["decision"]) for row in report["agent_trace"]] == [
+        ("bull", "ok"), ("bear", "ok"), ("judge", "failed"), ("judge", "failed"),
+        ("analysis", "ok"), ("critic", "warning")]
+    assert report["verification"]["fallback"] == {"reason": "invalid_judgement", "replacement": "analysis"}
+    stored = next(iter(persistence._memory["reports"].values()))
+    assert stored["verification"]["fallback"] == report["verification"]["fallback"]
+    # Normal maximum 21 + one judge retry + one analysis fallback stays under job 32.
+    assert state._memory[budget._job_key(job["job_id"])][1]["units"] == 7
 
 
 @pytest.mark.parametrize("exception", [reports.JobCancelled, reports.LeaseLost, asyncio.CancelledError])

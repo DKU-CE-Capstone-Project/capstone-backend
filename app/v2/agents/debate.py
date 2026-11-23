@@ -18,16 +18,35 @@ JUDGE_PROMPT_VERSION = "debate-judge-v2"
 MAX_STOCKS = 6
 MAX_ARGUMENTS_PER_TARGET = 2
 MAX_CLAIMS = 12
+# One retry for an unusable judgement; then the caller falls back to analyze().
+JUDGE_ATTEMPTS = 2
 _CLAIM_ID = re.compile(r"c(?:[1-9]|1[0-2])\Z")
 Generator = Callable[..., Awaitable[str]]
 
 
 class DebateUnavailable(ValueError):
-    """Both analysts produced unusable responses; caller may use analyze()."""
+    """No usable debate result; caller may use analyze().
+
+    The message is a safe reason: ``analysts_unavailable`` (both analysts
+    unusable) or ``invalid_judgement`` (every judge attempt unusable).
+    """
 
 
 class DebateOutputError(ValueError):
     """Safe classification, with no provider response or article content."""
+
+    def __init__(self, category: str, issues: list[dict] | None = None):
+        super().__init__(category)
+        # Field paths and error codes only, never response values.
+        self.issues = issues or []
+
+
+def _issues(error: ValidationError) -> list[dict]:
+    # Error messages and context can include response values. Keep only paths and codes.
+    return [
+        {"path": list(issue["loc"]), "type": issue["type"]}
+        for issue in error.errors(include_input=False, include_context=False, include_url=False)[:8]
+    ]
 
 
 class _Output(BaseModel):
@@ -114,13 +133,20 @@ def normalize_report(payload: dict, evidence: list[dict], *, claims_enabled: boo
 
     try:
         report = ReportOutput.model_validate(payload).model_dump()
+    except ValidationError as error:
+        raise DebateOutputError("invalid_report", _issues(error)) from None
     except (TypeError, ValueError):
         raise DebateOutputError("invalid_report") from None
     if len(report["stock_impacts"]) > MAX_STOCKS:
         raise DebateOutputError("too_many_stocks")
     allowed = {item["news_id"] for item in evidence}
-    if any(not set(stock["evidence_news_ids"]).issubset(allowed) for stock in report["stock_impacts"]):
-        raise DebateOutputError("unused_evidence")
+    unused = [
+        {"path": ["stock_impacts", index, "evidence_news_ids"], "type": "unused_evidence"}
+        for index, stock in enumerate(report["stock_impacts"])
+        if not set(stock["evidence_news_ids"]).issubset(allowed)
+    ]
+    if unused:
+        raise DebateOutputError("unused_evidence", unused[:8])
 
     claims = []
     seen = set()
@@ -206,11 +232,7 @@ async def _analyst(side: str, evidence: list[dict], rag: list[dict], generate: G
                 item["sentence_found"] = _sentence_found(item["evidence"], evidence)
         except ValidationError as error:
             failure = "invalid_argument_schema"
-            # Error messages and context can include response values. Keep only paths and codes.
-            issues = [
-                {"path": issue["loc"], "type": issue["type"]}
-                for issue in error.errors(include_input=False, include_context=False, include_url=False)[:8]
-            ]
+            issues = _issues(error)
         except DebateOutputError as error:
             failure = str(error)
         except (TypeError, ValueError) as error:
@@ -305,26 +327,39 @@ async def run_debate(evidence, rag, *, bull_generate, bear_generate, judge_gener
         raise
     if bull is None and bear is None:
         raise DebateUnavailable("analysts_unavailable")
-    started = time.monotonic()
-    with usage_context(stage="judge"):
-        try:
-            raw = await judge_generate(
-                _judge_prompt(evidence, rag, bull, bear, claims_enabled),
-                purpose="judge", max_output_tokens=8192,
-            )
-        except BaseException:
-            _record("judge", "failed", "중재 실행을 완료하지 못했습니다.", started)
-            raise
-        try:
-            payload = _parse(raw)
-            # Same six-target limit as the analysis fallback; trim the raw list
-            # because normalize_report pairs it with the validated stocks.
-            if isinstance(payload.get("stock_impacts"), list):
-                payload["stock_impacts"] = payload["stock_impacts"][:MAX_STOCKS]
-            report = normalize_report(payload, evidence, claims_enabled=claims_enabled)
-            debate = _debate_rows(payload.get("debate"), report, bull_available=bull is not None, bear_available=bear is not None)
-        except (TypeError, ValueError):
-            _record("judge", "failed", "중재 응답 또는 인용 형식을 확인하지 못했습니다.", started)
-            raise DebateOutputError("invalid_judgement") from None
-    _record("judge", "ok", f"종목 영향 {len(report['stock_impacts'])}건, 주장 {len(report['claims'])}건을 생성했습니다.", started)
-    return report, debate
+    prompt = _judge_prompt(evidence, rag, bull, bear, claims_enabled)
+    for attempt in range(1, JUDGE_ATTEMPTS + 1):
+        started = time.monotonic()
+        with usage_context(stage="judge"):
+            try:
+                # Each attempt goes through the caller's checkpoint and budget.
+                raw = await judge_generate(prompt, purpose="judge", max_output_tokens=8192)
+            except BaseException:
+                # Control, budget and provider failures are never retried here.
+                _record("judge", "failed", "중재 실행을 완료하지 못했습니다.", started)
+                raise
+            issues = []
+            try:
+                payload = _parse(raw)
+                # Same six-target limit as the analysis fallback; trim the raw list
+                # because normalize_report pairs it with the validated stocks.
+                if isinstance(payload.get("stock_impacts"), list):
+                    payload["stock_impacts"] = payload["stock_impacts"][:MAX_STOCKS]
+                report = normalize_report(payload, evidence, claims_enabled=claims_enabled)
+                debate = _debate_rows(payload.get("debate"), report, bull_available=bull is not None, bear_available=bear is not None)
+            except DebateOutputError as error:
+                failure, issues = str(error), error.issues
+            except ValidationError as error:
+                failure, issues = "invalid_debate_schema", _issues(error)
+            except (TypeError, ValueError) as error:
+                failure = type(error).__name__
+            else:
+                _record("judge", "ok", f"종목 영향 {len(report['stock_impacts'])}건, 주장 {len(report['claims'])}건을 생성했습니다.", started)
+                return report, debate
+            emit("agent_output_validation", provider="application", operation="debate_judge",
+                 outcome="error", attempt=attempt, error_type=failure, validation_issues=issues)
+            retry = attempt < JUDGE_ATTEMPTS
+            _record("judge", "failed",
+                    "중재 응답 또는 인용 형식을 확인하지 못해 "
+                    + ("다시 시도합니다." if retry else "기존 분석으로 대체합니다."), started)
+    raise DebateUnavailable("invalid_judgement")
