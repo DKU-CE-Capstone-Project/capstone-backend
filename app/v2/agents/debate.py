@@ -6,18 +6,21 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, ValidationError
 
 from app.telemetry import emit, usage_context
 
-BULL_PROMPT_VERSION = "debate-bull-v2"
-BEAR_PROMPT_VERSION = "debate-bear-v2"
+BULL_PROMPT_VERSION = "debate-bull-v3"
+BEAR_PROMPT_VERSION = "debate-bear-v3"
 JUDGE_PROMPT_VERSION = "debate-judge-v2"
 MAX_STOCKS = 6
 MAX_ARGUMENTS_PER_TARGET = 2
 MAX_CLAIMS = 12
+# Analyst free text over these limits is cut, like the judge's debate lines.
+# Names, tickers and quoted sentences are never cut: they are identity or evidence.
+ARGUMENT_TEXT_LIMITS = {"text": 100, "falsifier": 120}
 # One retry for an unusable judgement; then the caller falls back to analyze().
 JUDGE_ATTEMPTS = 2
 _CLAIM_ID = re.compile(r"c(?:[1-9]|1[0-2])\Z")
@@ -61,15 +64,16 @@ class _Evidence(_Output):
 class _Argument(_Output):
     name: StrictStr = Field(min_length=1, max_length=100)
     ticker: StrictStr | None = Field(default=None, max_length=32)
-    text: StrictStr = Field(min_length=1, max_length=100)
+    text: StrictStr = Field(min_length=1, max_length=ARGUMENT_TEXT_LIMITS["text"])
     kind: Literal["fact", "interpretation"] = "interpretation"
     evidence: list[_Evidence] = Field(min_length=1, max_length=3)
-    falsifier: StrictStr | None = Field(default=None, max_length=120)
+    falsifier: StrictStr | None = Field(default=None, max_length=ARGUMENT_TEXT_LIMITS["falsifier"])
 
 
 class _Side(_Output):
-    # Enforce the count after trimming each target to its first two arguments.
-    arguments: list[_Argument] = Field(min_length=1)
+    # Only the envelope. _arguments() checks each argument on its own, and the
+    # per-target count is enforced after that.
+    arguments: list[Any] = Field(min_length=1)
 
 
 class _Claim(_Output):
@@ -207,6 +211,35 @@ def _side_prompt(side: str, evidence: list[dict], rag: list[dict]) -> str:
     )
 
 
+def _arguments(raw_arguments: list) -> tuple[list[dict], list[dict], int]:
+    """Check analyst arguments one by one so a bad one costs only itself.
+
+    Over-length free text is cut to its limit and evidence beyond the third is
+    dropped. Any other violation drops that argument. Returns the valid
+    arguments, the field paths and codes of everything cut or dropped, and the
+    number of cut fields.
+    """
+    valid, notes, truncated = [], [], 0
+    for index, raw in enumerate(raw_arguments):
+        candidate = raw
+        if isinstance(raw, dict):
+            candidate = dict(raw)
+            for field, limit in ARGUMENT_TEXT_LIMITS.items():
+                value = candidate.get(field)
+                if isinstance(value, str) and len(value) > limit:
+                    candidate[field] = value[:limit]
+                    truncated += 1
+                    notes.append({"path": ["arguments", index, field], "type": "string_too_long"})
+            refs = candidate.get("evidence")
+            if isinstance(refs, list):
+                candidate["evidence"] = refs[:3]
+        try:
+            valid.append(_Argument.model_validate(candidate).model_dump())
+        except ValidationError as error:
+            notes += [{**issue, "path": ["arguments", index, *issue["path"]]} for issue in _issues(error)]
+    return valid, notes, truncated
+
+
 async def _analyst(side: str, evidence: list[dict], rag: list[dict], generate: Generator) -> list[dict] | None:
     started = time.monotonic()
     with usage_context(stage=side):
@@ -217,7 +250,10 @@ async def _analyst(side: str, evidence: list[dict], rag: list[dict], generate: G
             raise
         issues = []
         try:
-            candidates = _Side.model_validate(_parse(raw)).model_dump()["arguments"]
+            raw_arguments = _Side.model_validate(_parse(raw)).arguments
+            candidates, notes, truncated = _arguments(raw_arguments)
+            if not candidates:
+                raise DebateOutputError("invalid_argument_schema", notes[:8])
             counts = {}
             arguments = []
             for item in candidates:
@@ -234,14 +270,17 @@ async def _analyst(side: str, evidence: list[dict], rag: list[dict], generate: G
             failure = "invalid_argument_schema"
             issues = _issues(error)
         except DebateOutputError as error:
-            failure = str(error)
+            failure, issues = str(error), error.issues
         except (TypeError, ValueError) as error:
             failure = type(error).__name__
         else:
+            # discarded: over the per-target count. invalid: dropped by the schema.
             discarded = len(candidates) - len(arguments)
-            if discarded:
+            invalid = len(raw_arguments) - len(candidates)
+            if discarded or invalid or truncated:
                 emit("agent_output_normalized", provider="application", operation="debate_analyst",
-                     outcome="success", discarded_arguments=discarded)
+                     outcome="success", discarded_arguments=discarded, invalid_arguments=invalid,
+                     truncated_fields=truncated, validation_issues=notes[:8])
             _record(side, "ok", f"논거 {len(arguments)}건을 생성했습니다.", started)
             return arguments
         emit("agent_output_validation", provider="application", operation="debate_analyst",

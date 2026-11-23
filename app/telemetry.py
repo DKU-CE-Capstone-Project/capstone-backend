@@ -43,6 +43,8 @@ _FIELDS = {
     "error_type",
     "validation_issues",
     "discarded_arguments",
+    "invalid_arguments",
+    "truncated_fields",
 }
 
 
