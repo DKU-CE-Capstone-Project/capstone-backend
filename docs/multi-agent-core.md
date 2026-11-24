@@ -11,7 +11,7 @@
 ## 실행과 안전 경계
 
 - collect()는 작업 간 기록을 분리하고 병렬 자식의 순서를 공유함. 기록은128건, 요약120자로 제한함. 전략 기록은 Strategy.agent_trace에 별도로 저장함.
-- 강세·레드팀 약세가 병렬로 같은 본문을 읽고 중재가 판정함. 한쪽 응답 실패는 빈 논거, 양쪽 실패는 기존 분석으로 대체함. 잘못된 중재 기본 필드나 기사 인용은 그 중재 응답을 버리고 1회 다시 호출함. 다시 실패하면 기존 분석으로 대체함(debate=[], agent_trace에 judge failed 2건). 대체하면 verification.fallback에 reason(analysts_unavailable|invalid_judgement)과 replacement=analysis를 남기며 status/notes 의미는 바꾸지 않음. 검사 실패 사유는 agent_output_validation(operation=debate_judge, attempt, error_type, 필드 경로·코드만)으로 남김.
+- 강세·레드팀 약세가 병렬로 같은 본문을 읽고 중재가 판정함. 한쪽 응답 실패는 빈 논거, 양쪽 실패는 기존 분석으로 대체함. 분석가 논거는 하나씩 검사함. text(100자)·falsifier(120자) 초과분은 상한까지 자르고 근거는 앞 3개만 쓰며, 그 밖의 형식 오류는 해당 논거만 제외함. 쓸 수 있는 논거가 하나도 없을 때만 그쪽 응답 실패로 처리함. 자르거나 제외한 내역은 agent_output_normalized(truncated_fields, invalid_arguments, discarded_arguments, 필드 경로·코드만)로 남김. 잘못된 중재 기본 필드나 기사 인용은 그 중재 응답을 버리고 1회 다시 호출함. 다시 실패하면 기존 분석으로 대체함(debate=[], agent_trace에 judge failed 2건). 대체하면 verification.fallback에 reason(analysts_unavailable|invalid_judgement)과 replacement=analysis를 남기며 status/notes 의미는 바꾸지 않음. 검사 실패 사유는 agent_output_validation(operation=debate_judge, attempt, error_type, 필드 경로·코드만)으로 남김.
 - 생성 콜백은 작업 취소·리스 → 예산 → LLM 순서를 지킴. 정책 거부·취소·리스 예외를 모의 성공으로 바꾸지 않음. 실패한 병렬 호출의 자식 작업을 회수함.
 - USE_CRITIC=false이면 주장 검증과 수정의 모델 호출을 하지 않고 unavailable을 유지함. 원문 문장 존재와 의미상 지지는 별도임.
 - claims 생성 필드는 방어적으로 파싱하고 주장12·종목6·연결3 상한을 적용함. B는 claims/claim_ids를 공개하지 않음. claims 문장200자만 공개하며 used_evidence.input_excerpt는 계속 비공개임.

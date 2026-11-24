@@ -122,7 +122,8 @@ async def test_one_invalid_side_continues_and_forces_failed_array_empty(failed_s
 async def test_invalid_analyst_schema_logs_field_and_code_without_response_values(capsys):
     payload = side_payload()
     marker = "private-provider-output"
-    payload["arguments"][0]["text"] = marker * 10
+    # A name is identity and is never cut, so the only argument is unusable.
+    payload["arguments"][0]["name"] = marker * 10
     job_id = "400b5319-b7f7-4bc3-b41e-be316db87e5f"
 
     with usage_context(job_id=job_id):
@@ -135,7 +136,100 @@ async def test_invalid_analyst_schema_logs_field_and_code_without_response_value
     assert event["job_id"] == job_id
     assert event["stage"] == "bear"
     assert event["error_type"] == "invalid_argument_schema"
-    assert event["validation_issues"] == [{"path": ["arguments", 0, "text"], "type": "string_too_long"}]
+    assert event["validation_issues"] == [{"path": ["arguments", 0, "name"], "type": "string_too_long"}]
+
+
+@pytest.mark.parametrize("side", ["bull", "bear"])
+async def test_overlong_argument_text_is_cut_to_limit_and_side_survives(side, capsys):
+    """R1 2026-11-23 (job d519b707): the format check discarded the whole bull side."""
+    from app.v2.agents.trace import collect
+
+    template = side_payload()["arguments"][0]
+    marker = "private-provider-output"
+    first, third = "가" * 99 + marker, "나" * 100 + marker
+    arguments = [
+        {**template, "text": first},
+        {**template, "name": "은행", "text": "은행 논거"},
+        {**template, "name": "운수", "text": third},
+    ]
+    calls = []
+    job_id = "d519b707-a9f8-4ef7-b41d-12019df01e09"
+
+    with usage_context(job_id=job_id), collect() as records:
+        _, rows = await run(**{side: generator({"arguments": arguments})},
+                            judge=generator(report_payload(), calls))
+
+    assert [item["text"] for item in calls[0][0][side]] == [first[:100], "은행 논거", third[:100]]
+    assert rows[0][side]
+    assert [row["decision"] for row in records if row["agent"] == side] == ["ok"]
+    output = capsys.readouterr().out
+    assert marker not in output
+    event = json.loads(output)
+    assert event["kind"] == "agent_output_normalized"
+    assert event["stage"] == side
+    assert event["job_id"] == job_id
+    assert (event["truncated_fields"], event["invalid_arguments"], event["discarded_arguments"]) == (2, 0, 0)
+    assert event["validation_issues"] == [
+        {"path": ["arguments", 0, "text"], "type": "string_too_long"},
+        {"path": ["arguments", 2, "text"], "type": "string_too_long"},
+    ]
+
+
+async def test_overlong_falsifier_is_cut_and_extra_evidence_keeps_first_three(capsys):
+    payload = side_payload()
+    argument = payload["arguments"][0]
+    argument["falsifier"] = "다" * 121
+    argument["evidence"] = [{"news_id": "n1", "sentence": QUOTE}] * 3 + [{"news_id": "n1", "sentence": "넷째 인용"}]
+    calls = []
+
+    await run(bear=generator(payload), judge=generator(report_payload(), calls))
+
+    sent = calls[0][0]["bear"][0]
+    assert sent["falsifier"] == "다" * 120
+    assert [ref["sentence"] for ref in sent["evidence"]] == [QUOTE] * 3
+    assert sent["sentence_found"] is True
+    event = json.loads(capsys.readouterr().out)
+    assert event["kind"] == "agent_output_normalized"
+    assert (event["truncated_fields"], event["invalid_arguments"], event["discarded_arguments"]) == (1, 0, 0)
+    assert event["validation_issues"] == [{"path": ["arguments", 0, "falsifier"], "type": "string_too_long"}]
+
+
+async def test_invalid_argument_drops_only_itself_and_logs_paths_without_values(capsys):
+    template = side_payload()["arguments"][0]
+    marker = "private-provider-output"
+    # A quoted sentence is evidence and is never cut.
+    long_quote = {**template, "name": "은행", "evidence": [{"news_id": "n1", "sentence": marker * 10}]}
+    no_evidence = {**template, "name": "운수", "evidence": []}
+    calls = []
+
+    _, rows = await run(bull=generator({"arguments": [long_quote, template, marker, no_evidence]}),
+                        judge=generator(report_payload(), calls))
+
+    assert calls[0][0]["bull"] == [{**template, "sentence_found": True}]
+    assert rows[0]["bull"]
+    output = capsys.readouterr().out
+    assert marker not in output
+    event = json.loads(output)
+    assert event["kind"] == "agent_output_normalized"
+    assert (event["truncated_fields"], event["invalid_arguments"], event["discarded_arguments"]) == (0, 3, 0)
+    assert event["validation_issues"] == [
+        {"path": ["arguments", 0, "evidence", 0, "sentence"], "type": "string_too_long"},
+        {"path": ["arguments", 2], "type": "model_type"},
+        {"path": ["arguments", 3, "evidence"], "type": "too_short"},
+    ]
+
+
+@pytest.mark.parametrize(("payload", "code"), [
+    ({}, "missing"), ({"arguments": []}, "too_short"), ({"arguments": "논거"}, "list_type"),
+])
+async def test_argument_envelope_violation_still_fails_the_side(payload, code, capsys):
+    calls = []
+    _, rows = await run(bull=generator(payload), judge=generator(report_payload(), calls))
+    assert calls[0][0]["bull"] is None
+    assert rows[0]["bull"] == []
+    event = json.loads(capsys.readouterr().out)
+    assert (event["kind"], event["error_type"]) == ("agent_output_validation", "invalid_argument_schema")
+    assert event["validation_issues"] == [{"path": ["arguments"], "type": code}]
 
 
 async def test_both_unusable_sides_signal_existing_analysis_fallback_to_caller():
