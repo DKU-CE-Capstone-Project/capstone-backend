@@ -236,11 +236,18 @@ class Revision(BaseModel):
     rounds: list[RevisionRound] = Field(max_length=2)
 
 
+class VerificationFallback(BaseModel):
+    reason: Literal['analysts_unavailable', 'invalid_judgement']
+    replacement: Literal['analysis']
+
+
 class Verification(BaseModel):
     status: Literal['passed', 'warning', 'unavailable']
     notes: list[str]
     claims_summary: ClaimsSummary | None = None
     revision: Revision | None = None
+    # Present only when the debate arm fell back to the single analysis path.
+    fallback: VerificationFallback | None = None
 
 
 class Report(BaseModel):

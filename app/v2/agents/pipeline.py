@@ -172,16 +172,22 @@ async def analyze_report(evidence, rag, *, analyze, verify, on_stage=None):
                      elapsed_ms=int((time.monotonic() - started) * 1000))
         return candidate, checked
 
+    fallback = None
     with trace.collect() as entries:
         if multi:
-            from app.v2.agents.debate import DebateUnavailable, run_debate
+            from app.v2.agents.debate import FALLBACK_REASONS, DebateUnavailable, run_debate
             await checkpoint("debating")
             try:
                 report, debate = await run_debate(
                     evidence, rag, bull_generate=generator("bull"),
                     bear_generate=generator("bear"), judge_generate=generator("judge"),
                     claims_enabled=claims_on)
-            except DebateUnavailable:
+            except DebateUnavailable as error:
+                # Safe reason only. An unknown reason would be stored but make
+                # GET /reports fail response validation, so stop before saving.
+                if str(error) not in FALLBACK_REASONS:
+                    raise ValueError("Unknown debate fallback reason") from error
+                fallback = {"reason": str(error), "replacement": "analysis"}
                 report, debate = await base_analysis(), []
             report["debate"] = debate
         else:
@@ -219,6 +225,9 @@ async def analyze_report(evidence, rag, *, analyze, verify, on_stage=None):
             report.pop("claims", None)
             for stock in report["stock_impacts"]:
                 stock.pop("claim_ids", None)
+        if fallback is not None:
+            # Separate from status/notes, whose meaning and strategy input stay unchanged.
+            checked["fallback"] = fallback
         if enabled():
             report["agent_trace"] = deepcopy(entries)
         return report, checked

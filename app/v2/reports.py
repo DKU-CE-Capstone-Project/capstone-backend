@@ -777,7 +777,7 @@ async def _pipeline(sid: str, job_id: str, token: str) -> None:
                 await _update(sid, job_id, token, stage="saving")
                 await lock.assert_owned()
                 observed = persistence.now()
-                doc = {**output, "schema_version": 2, "report_id": str(uuid.uuid4()), "requested_news_ids": sorted(request["news_ids"]), "used_evidence": evidence, "failed_evidence": failed, "coverage": {"requested_count": len(request["news_ids"]), "used_count": len(evidence), "failed_count": len(failed)}, "rag_evidence": rag, "verification": verification, "generation_key": cache_key, "reuse_eligible": not bool(failed), "generation": config, "created_at": observed, "updated_at": observed}
+                doc = {**output, "schema_version": 2, "report_id": str(uuid.uuid4()), "requested_news_ids": sorted(request["news_ids"]), "used_evidence": evidence, "failed_evidence": failed, "coverage": {"requested_count": len(request["news_ids"]), "used_count": len(evidence), "failed_count": len(failed)}, "rag_evidence": rag, "verification": verification, "generation_key": cache_key, "reuse_eligible": not bool(failed) and not verification.get("fallback"), "generation": config, "created_at": observed, "updated_at": observed}
                 report, report_reused = await persistence.save_report(doc)
     result = {"report_id": report["report_id"], "strategy_id": None, "report_reused": report_reused, "strategy_reused": False}
     # Record the durable report before strategy generation so a redelivery can

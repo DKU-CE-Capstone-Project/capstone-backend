@@ -148,22 +148,101 @@ async def test_both_unusable_sides_signal_existing_analysis_fallback_to_caller()
 async def test_judge_rejects_stock_reference_outside_selected_bodies():
     payload = report_payload()
     payload["stock_impacts"][0]["evidence_news_ids"] = ["rag-only-id"]
-    with pytest.raises(debate.DebateOutputError, match="invalid_judgement"):
-        await run(judge=generator(payload))
+    calls = []
+    # Never accepted as a judgement; after one retry the caller uses analyze().
+    with pytest.raises(debate.DebateUnavailable, match="invalid_judgement"):
+        await run(judge=generator(payload, calls))
+    assert len(calls) == debate.JUDGE_ATTEMPTS == 2
 
 
-async def test_truncated_judge_json_fails_without_including_provider_output():
+async def test_truncated_judge_json_fails_without_including_provider_output(capsys):
     secret_like_marker = "private-provider-response"
-    with pytest.raises(debate.DebateOutputError) as caught:
+    with pytest.raises(debate.DebateUnavailable) as caught:
         await run(judge=generator('{"title":"' + secret_like_marker))
     assert secret_like_marker not in str(caught.value)
+    output = capsys.readouterr().out
+    assert secret_like_marker not in output
+    assert [json.loads(line)["error_type"] for line in output.splitlines()] == ["invalid_json", "invalid_json"]
 
 
-async def test_invalid_base_report_stays_a_failure():
+async def test_invalid_base_report_signals_fallback():
     payload = report_payload()
     payload.pop("event_analysis")
-    with pytest.raises(debate.DebateOutputError):
+    with pytest.raises(debate.DebateUnavailable, match="invalid_judgement"):
         await run(judge=generator(payload))
+
+
+def judge_sequence(*payloads, calls=None):
+    """Return each scripted judge response once, in order."""
+    remaining = list(payloads)
+
+    async def generate(prompt, **kwargs):
+        if calls is not None:
+            calls.append((kwargs, (_context.get() or {}).get("stage")))
+        value = remaining.pop(0)
+        return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return generate
+
+
+async def test_invalid_judgement_retries_once_and_keeps_valid_second_response(capsys):
+    """R1 2026-11-23 (job 6b5accf4): one invalid judge response failed the whole job."""
+    from app.v2.agents.trace import collect
+
+    invalid = report_payload()
+    invalid["stock_impacts"][0]["evidence_news_ids"] = ["rag-only-id"]
+    calls = []
+    job_id = "6b5accf4-02be-4d56-b74a-444babba7787"
+
+    with usage_context(job_id=job_id), collect() as records:
+        report, rows = await run(judge=judge_sequence(invalid, report_payload(), calls=calls))
+
+    assert report["title"] == "수출 분석"
+    assert report["stock_impacts"][0]["evidence_news_ids"] == ["n1"]
+    assert rows == report_payload()["debate"]
+    assert calls == [({"purpose": "judge", "max_output_tokens": 8192}, "judge")] * 2
+    assert [(row["agent"], row["decision"]) for row in records if row["agent"] == "judge"] == [
+        ("judge", "failed"), ("judge", "ok")]
+    output = capsys.readouterr().out
+    assert "rag-only-id" not in output
+    event = json.loads(output)
+    assert event["kind"] == "agent_output_validation"
+    assert event["operation"] == "debate_judge"
+    assert event["stage"] == "judge"
+    assert event["job_id"] == job_id
+    assert event["attempt"] == 1
+    assert event["error_type"] == "unused_evidence"
+    assert event["validation_issues"] == [
+        {"path": ["stock_impacts", 0, "evidence_news_ids"], "type": "unused_evidence"}]
+
+
+async def test_invalid_judgement_twice_logs_each_reason_then_signals_fallback(capsys):
+    from app.v2.agents.trace import collect
+
+    missing = report_payload()
+    missing.pop("event_analysis")
+    calls = []
+    with collect() as records, pytest.raises(debate.DebateUnavailable, match="invalid_judgement"):
+        await run(judge=judge_sequence(missing, "not json", calls=calls))
+    assert len(calls) == 2
+    judge_rows = [row for row in records if row["agent"] == "judge"]
+    assert [row["decision"] for row in judge_rows] == ["failed", "failed"]
+    assert "다시 시도" in judge_rows[0]["summary"] and "대체" in judge_rows[1]["summary"]
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [(e["attempt"], e["error_type"]) for e in events] == [(1, "invalid_report"), (2, "invalid_json")]
+    assert events[0]["validation_issues"] == [{"path": ["event_analysis"], "type": "missing"}]
+    assert events[1]["validation_issues"] == []
+
+
+async def test_judge_control_failure_is_not_retried():
+    calls = []
+
+    async def judge(prompt, **kwargs):
+        calls.append(kwargs)
+        raise ProviderBudgetError(429, "JOB_BUDGET_EXCEEDED", "budget", False)
+
+    with pytest.raises(ProviderBudgetError):
+        await run(judge=judge)
+    assert len(calls) == 1
 
 
 def many_stocks_payload(count):
@@ -182,10 +261,10 @@ async def test_judge_stock_impacts_over_limit_keep_first_six_in_order(count):
     assert all(stock["claim_ids"] == ["c1"] for stock in report["stock_impacts"])
 
 
-async def test_judge_stock_impacts_not_a_list_stays_a_failure():
+async def test_judge_stock_impacts_not_a_list_signals_fallback():
     payload = report_payload()
     payload["stock_impacts"] = {"name": "반도체 업종"}
-    with pytest.raises(debate.DebateOutputError, match="invalid_judgement"):
+    with pytest.raises(debate.DebateUnavailable, match="invalid_judgement"):
         await run(judge=generator(payload))
 
 
