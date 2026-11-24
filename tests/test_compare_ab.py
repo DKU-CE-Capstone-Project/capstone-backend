@@ -293,3 +293,85 @@ def test_nested_objects_cannot_occupy_contract_scalar_fields(path):
     target[path[-1]] = {"nested_metadata": "fixture-private-nested"}
     with pytest.raises(compare_ab.ComparisonError, match="INVALID_RUNNER_FIELD_SHAPE"):
         compare_ab.fixture_runner({"arms": {"A": value}}, ["A"])
+
+
+def test_batch_cli_creates_one_blinded_sheet_for_ten_cases(tmp_path):
+    inputs = []
+    for case_number in range(1, 11):
+        payload = snapshot()
+        payload["report"]["used_evidence"][0].update(
+            news_id=f"news-{case_number}", input_excerpt=f"원본 본문 {case_number}번"
+        )
+        path = tmp_path / f"fixture-private-path-{case_number}.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        inputs.extend(["--input", str(path)])
+    fixtures = tmp_path / "fixtures.json"
+    fixtures.write_text(json.dumps({"arms": {arm: result() for arm in ("A", "B", "C")}}), encoding="utf-8")
+    directory = tmp_path / "batch"
+    process = subprocess.run([
+        sys.executable, "scripts/compare_ab.py", *inputs, "--fixtures", str(fixtures),
+        "--output-dir", str(directory), "--seed", "19",
+    ], text=True, capture_output=True, check=False)
+
+    assert process.returncode == 0, process.stderr
+    assert json.loads(process.stdout) == {"execution_mode": "fixture", "completed": 30,
+                                        "runs": 30, "logical_generate_calls": 0}
+    saved = (directory / "comparison.json").read_text(encoding="utf-8")
+    assert "원본 본문" not in saved and "fixture-private-path" not in saved
+    record = json.loads(saved)
+    assert record["schema_version"] == 2
+    assert len({case["input_digest"] for case in record["cases"].values()}) == 10
+    assert record["cases"]["case-010"]["selected_news_ids"] == ["news-10"]
+    with (directory / "comparison.csv").open(encoding="utf-8-sig", newline="") as file:
+        rows = list(csv.DictReader(file))
+    assert all(row["input_digest"] == record["cases"][row["case_id"]]["input_digest"] for row in rows)
+
+    with (directory / "blind_scores.csv").open(encoding="utf-8-sig", newline="") as file:
+        scoring = list(csv.DictReader(file))
+    key = json.loads((directory / "answer_key.json").read_text(encoding="utf-8"))
+    assert len({row["assessment_id"] for row in scoring}) == 30
+    assert [(row["assessment_id"], row["case_id"]) for row in scoring] == [
+        (row["assessment_id"], row["case_id"]) for row in key["samples"]
+    ]
+    assert {(row["case_id"], row["arm"]) for row in key["samples"]} == {
+        (case_id, arm) for case_id in record["cases"] for arm in ("A", "B", "C")
+    }
+    assert set(scoring[0]) == {
+        "assessment_id", "case_id", "content", "grounding_0_1_2", "important_information_0_1_2", "comments"
+    }
+    assert all(not row["grounding_0_1_2"] and not row["important_information_0_1_2"] for row in scoring)
+    assert "fixture-arm-revealing" not in (directory / "blind_scores.csv").read_text(encoding="utf-8-sig")
+
+
+async def test_batch_preflight_and_shared_call_limit(tmp_path):
+    arms = ["A", "B", "C"]
+    payloads = [snapshot(), snapshot()]
+    payloads[1]["report"]["used_evidence"][0]["input_excerpt"] = "두 번째 고정 본문"
+    seen = []
+
+    async def runner(arm, evidence, rag, options, limit):
+        seen.append((arm, evidence[0]["input_excerpt"], limit.started))
+        limit.reserve()
+        evidence[0]["input_excerpt"] = "다른 실행에는 영향을 주지 않음"
+        return result()
+
+    invalid = deepcopy(payloads)
+    del invalid[1]["report"]["used_evidence"][0]["input_excerpt"]
+    with pytest.raises(compare_ab.ComparisonError, match="FULL_INPUT_EXCERPT_REQUIRED"):
+        await compare_ab.compare(invalid, arms, tmp_path / "invalid", runner=runner)
+    with pytest.raises(compare_ab.ComparisonError, match="CALL_LIMIT_BELOW_PLANNED"):
+        await compare_ab.compare(payloads, arms, tmp_path / "low", runner=runner,
+                                 execution_mode="live", repeats=2, max_calls=95)
+    with pytest.raises(compare_ab.ComparisonError, match="DUPLICATE_INPUT_CASE"):
+        await compare_ab.compare([snapshot(), snapshot()], arms, tmp_path / "duplicate", runner=runner)
+    assert not seen and not list(tmp_path.iterdir())
+
+    record = await compare_ab.compare(payloads, arms, tmp_path / "enough", runner=runner,
+                                      execution_mode="live", repeats=2, max_calls=96)
+    assert record["planned_logical_calls_upper_bound"] == 96
+    assert record["logical_generate_calls"] == 12
+    assert seen == [
+        (arm, excerpt, i * 6 + repeat * 3 + j)
+        for i, excerpt in enumerate(("회사의 수출은 증가했다.", "두 번째 고정 본문"))
+        for repeat in range(2) for j, arm in enumerate(arms)
+    ]
